@@ -34,10 +34,8 @@ cores see positions minus the window origin. A window origin at or below the pos
 float64, so every distance the cores compute equals the whole-grid one (the sub-pixel test of the aperture weights is
 a second rounding: equal unless a sample lies within ~1e-13 px of the aperture edge).
 
-Round 2 note: psf.py is still a skeleton on main, so the input-map primitives (reading a FITS window, the smoothed
-error), the PSF build and MosaicPSF are reached through private adapters to the old pacs_mosaic / pacs_psf / pacs_fit
-code, each marked `# R3: swap` (round 3 replaces them by psf.InputMap / psf.build_smoothed_error /
-psf.build_mosaic_psf / psf.MosaicPSF, same results).
+The input maps (reading a FITS window, the smoothed error) are psf.InputMap's; the PSF is read by psf.MosaicPSF and
+built here (`build_mosaic_psf`, which measures its tables with this module's aperture core and area factors).
 """
 
 from __future__ import annotations
@@ -59,7 +57,8 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from joblib import Parallel, delayed
 from numpy.lib.format import open_memmap
-from scipy.ndimage import gaussian_filter, maximum_filter
+from scipy.ndimage import gaussian_filter, map_coordinates, maximum_filter
+from scipy.signal import fftconvolve
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
@@ -69,10 +68,6 @@ from sesnaimpute.definitions import PACS_PIXEL_ARCSEC as PIXEL_ARCSEC
 from sesnaimpute.sky.derived.pacs import grid, psf
 from sesnaimpute.sky.derived.pacs.grid import CellGrid, PixelGrid, TiledLayer
 from sesnaimpute.sky.download.herschel_pacs.index import MapRecord, map_rank, maps_root, read_index
-# R3: swap -- the three old modules below serve only the adapters to psf.py (a skeleton in round 2)
-from sesnaimpute.sky.derived import pacs_fit as _old_fit
-from sesnaimpute.sky.derived import pacs_mosaic as _old_mosaic
-from sesnaimpute.sky.derived import pacs_psf as _old_psf
 
 warnings.filterwarnings("ignore", message=".*datfix.*")
 
@@ -175,7 +170,7 @@ def _print_input_set(region, band, kept, dropped) -> None:
 
 def group_key(config, record) -> tuple:
     """A map's PSF group key: its published templates and position angles (`pacs_mosaic.group_key`)."""
-    comps = _published_components(config, record)
+    comps = psf.published_components(config, record)
     return tuple((c.path, round(float(c.position_angle_deg), 6), round(float(c.image.sum()), 9),
                   round(float((c.image ** 2).sum()), 9)) for c in comps)
 
@@ -202,117 +197,126 @@ def _smooth_name(record) -> str:
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# adapters to psf.py (a skeleton in round 2): the old code's results, the new store's layout.  # R3: swap
+# the mosaic PSF's build (pacs_fit.py:1456-1676, moved unchanged; psf.MosaicPSF reads what it writes)
 
-def _published_components(config, record):
-    """`psf.published_components`.  # R3: swap"""
-    return _old_psf.published_components_for_map(config, record)
-
-
-def _beam_fwhm_arcsec(record) -> float:
-    """`psf.beam_fwhm_arcsec`.  # R3: swap"""
-    return _old_psf.beam_fwhm_arcsec(record)
+#: sub-pixel samples per output pixel of a PSF table
+PSF_SUBPIXEL_STEPS = 8
 
 
-def _aperture_eef(config, record) -> float:
-    """`psf.aperture_eef`.  # R3: swap"""
-    return _old_psf.aperture_eef(config, record)
+def _bspline_box_kernel(u):
+    """Bilinear interpolation (triangle, half-width 1) convolved with the unit input-pixel box: the quadratic
+    B-spline, support +-1.5, unit integral."""
+    a = np.abs(u)
+    return np.where(a <= 0.5, 0.75 - a ** 2, np.where(a <= 1.5, 0.5 * (1.5 - a) ** 2, 0.0))
 
 
-def _good(img, err, cov):
-    """`psf.good_pixels` (pacs_mosaic._good).  # R3: swap"""
-    return np.isfinite(img) & np.isfinite(err) & (err > 0) & (cov > 0)
+def _kernel_weights(jac, steps, broad):
+    """Weights on the fine output-pixel lattice (step 1/steps) of the input pixel's footprint: `broad` = box +
+    bilinear triangle (the resampled map's response to a delta), else the box alone. `jac`: d(input pixel)/d(output
+    pixel). Sum 1."""
+    inv = np.linalg.inv(jac)
+    half = int(np.ceil(1.5 * np.abs(inv).sum(axis=1).max())) + 1
+    o = np.arange(-half * steps, half * steps + 1) / steps
+    yy, xx = np.meshgrid(o, o, indexing="ij")
+    u = jac[0, 0] * xx + jac[0, 1] * yy
+    v = jac[1, 0] * xx + jac[1, 1] * yy
+    if broad:
+        w = _bspline_box_kernel(u) * _bspline_box_kernel(v)
+    else:
+        delta = np.abs(jac).sum(axis=1) / steps / 2.0                 # anti-aliased box edge, one fine step wide
+        w = (np.clip((0.5 - np.abs(u)) / delta[0] + 0.5, 0, 1) * np.clip((0.5 - np.abs(v)) / delta[1] + 0.5, 0, 1))
+    return w / w.sum(), half
 
 
-def _read_layers(input_map, rows: slice, cols: slice):
-    """`psf.InputMap.layers` (pacs_mosaic._read_layers): float64 copies of the window rows x cols.  # R3: swap"""
-    rec = input_map.record
-    with fits.open(os.path.join(input_map.maps_root, rec.path), mode="denywrite", memmap=True) as hdus:
-        return tuple(np.array(hdus[i].data[rows, cols], dtype=np.float64)
-                     for i in (rec.image_hdu, rec.error_hdu, rec.coverage_hdu))
+def _node_table(components, out_wcs, node, jac, extent, steps, out_area, broad):
+    """One spatial node's response, (count, count): the unit-flux template (mean of the scan columns,
+    psf.template_density) on the north-up output grid around output pixel `node` = (x, y), convolved with the input
+    footprint (`_kernel_weights`), sampled at output-pixel offsets -extent..extent in 1/steps; per output pixel (flux), at
+    the node's own output pixel area (`tan_area_factor`)."""
+    weights, half = _kernel_weights(jac, steps, broad)
+    count = int(2 * extent * steps) + 1
+    pad = half
+    big = count + 2 * pad * steps
+    o = (np.arange(big) - (big - 1) / 2) / steps
+    yy, xx = np.meshgrid(o, o, indexing="ij")
+    source = out_wcs.pixel_to_world(np.array([node[0]]), np.array([node[1]]))
+    east, north = source.spherical_offsets_to(out_wcs.pixel_to_world(xx + node[0], yy + node[1]))
+    density = psf.template_density(components, east.arcsec, north.arcsec)
+    conv = fftconvolve(density, weights, mode="same")
+    return conv[pad * steps:pad * steps + count, pad * steps:pad * steps + count] * (out_area * float(tan_area_factor(out_wcs, *node)))
 
 
-_SMOOTH_DENSE = {}
+def _table_aperture(table, extent, steps, band, pixel_arcsec):
+    """The aperture sums of a unit-flux source of a one-node table `table` (count, count): the mean over a 3 x 3
+    sub-pixel lattice of the aperture sum with the sky annulus's own scatter-free clipped sky (`_aperture_core` on the
+    noise-free image). Returns (enclosed: aperture sum before sky, aperture_fraction: after sky)."""
+    r_ap, r_in, r_out = (r / pixel_arcsec for r in APERTURES[band])
+    w = int(np.ceil(r_out)) + 3
+    offs = np.arange(-w, w + 1, dtype=float)
+    sub = np.arange(3) / 3.0
+    enclosed, fraction = [], []
+    for sy in sub:
+        for sx in sub:
+            yy, xx = np.meshgrid(offs - sy, offs - sx, indexing="ij")
+            img = map_coordinates(table, [(yy + extent) * steps, (xx + extent) * steps], order=1, mode="nearest",
+                                  prefilter=False).astype(np.float32)
+            f, s, _sd, area, cov = _aperture_core(img, np.ones_like(img), np.array([w + sx]), np.array([w + sy]),
+                                                  r_ap, r_in, r_out, grid.APERTURE_SUBPIXELS)
+            if not cov.all():
+                raise ValueError("the aperture of the mosaic table is not covered")
+            enclosed.append(float((f + s * area)[0]))
+            fraction.append(float(f[0]))
+    return float(np.mean(enclosed)), float(np.mean(fraction))
 
 
-def _smooth_dense(directory: str) -> np.ndarray:
-    """The smoothed-error samples of an input map as one dense float64 array, kept per process (they are small:
-    (ny / step) x (nx / step)); keyed by the store's index time, so a rebuilt store is read again.
-    # R3: swap (psf.InputMap.smoothed_error_at reads the TiledLayer)"""
-    key = (directory, os.stat(os.path.join(directory, "index.json")).st_mtime_ns)
-    if key not in _SMOOTH_DENSE:
-        for old in [k for k in _SMOOTH_DENSE if k[0] == directory]:
-            del _SMOOTH_DENSE[old]
-        _SMOOTH_DENSE[key] = TiledLayer.open(directory, "r").to_dense()
-    return _SMOOTH_DENSE[key]
+def _table_integral(table, extent, steps, band, pixel_arcsec):
+    """The flux fraction of a one-node table inside the aperture radius, integrated on the table's fine lattice (cells
+    of 1/steps output pixel, anti-aliased edge): the continuous counterpart of `_table_aperture`'s enclosed sum."""
+    r_ap = APERTURES[band][0] / pixel_arcsec
+    o = np.arange(table.shape[0]) / steps - extent
+    xx, yy = np.meshgrid(o, o)
+    w = np.clip((r_ap - np.hypot(xx, yy)) * steps + 0.5, 0.0, 1.0)
+    return float((table * w).sum() / steps ** 2)
 
 
-def _smoothed_error_at(input_map, px, py):
-    """`psf.InputMap.smoothed_error_at` (pacs_mosaic._lattice_at on the stored samples).  # R3: swap"""
-    return _old_mosaic._lattice_at(_smooth_dense(input_map.smooth.directory), input_map.smooth_step, px, py)
+def _jacobian(out_wcs, in_wcs, x, y):
+    """d(input pixel)/d(output pixel) at output pixel (x, y), by central differences through the sky."""
+    cols = []
+    for dx, dy in ((1.0, 0.0), (0.0, 1.0)):
+        ra, dec = out_wcs.all_pix2world([x - dx / 2, x + dx / 2], [y - dy / 2, y + dy / 2], 0)
+        px, py = in_wcs.all_world2pix(ra, dec, 0)
+        cols.append([px[1] - px[0], py[1] - py[0]])
+    return np.array(cols).T
 
 
-def _build_smoothed_error(input_map, out_dir: str) -> TiledLayer:
-    """`psf.build_smoothed_error`: pacs_mosaic._smooth_lattice's samples (FROZEN 6) written as a TiledLayer
-    (float64, fill NaN) instead of _smooth/<map>.npy.  # R3: swap"""
-    rec = input_map.record
-    win = grid.smooth_window_px(rec.pixel_scale_arcsec)
-    half, step = win // 2, grid.smooth_step_px(rec.pixel_scale_arcsec)
-    ny, nx = rec.shape
-    nj, ni = (ny - 1) // step + 2, (nx - 1) // step + 2
-    lat = np.full((nj, ni), np.nan)
-    with fits.open(os.path.join(input_map.maps_root, rec.path), mode="denywrite", memmap=True) as hdus:
-        eh, ch, ih = hdus[rec.error_hdu].data, hdus[rec.coverage_hdu].data, hdus[rec.image_hdu].data
-        for j in range(nj):
-            r0, r1 = max(0, j * step - half), min(ny, j * step + half + 1)
-            if r1 <= r0:
-                continue
-            err = np.array(eh[r0:r1], dtype=np.float64)
-            err[~_good(np.array(ih[r0:r1], dtype=np.float64), err, np.array(ch[r0:r1], dtype=np.float64))] = np.nan
-            padded = np.pad(err, ((0, 0), (half, max(0, (ni - 1) * step + win - nx - half))), constant_values=np.nan)
-            view = np.lib.stride_tricks.sliding_window_view(padded, (err.shape[0], win), axis=(0, 1))
-            cut = view[0, ::step][:ni].reshape(ni, -1)
-            ok = np.isfinite(cut).any(axis=1)
-            row = np.full(ni, np.nan)
-            row[ok] = np.nanmedian(cut[ok], axis=1)
-            lat[j] = row
-    return TiledLayer.from_dense(lat, out_dir, fill=np.nan)
+def _mosaic_node(components, out_wcs, in_wcs, node, extent, steps, out_area, band, pix, path, index, centre):
+    """One (sub-group, spatial node) of `build_mosaic_psf`, a worker's unit: the node's response table written
+    (unscaled, float32) into node `index` of the sub-group's table file `path`, and its aperture sums. Returns
+    (enclosed, aperture fraction) of the broad table and, at the centre node, the plain table's enclosed integral (the
+    normalisation) and the broad-over-plain total."""
+    jac = _jacobian(out_wcs, in_wcs, node[0], node[1])
+    broad = _node_table(components, out_wcs, node, jac, extent, steps, out_area, True)
+    e_broad, a_broad = _table_aperture(broad, extent, steps, band, pix)
+    e_plain = total = None
+    if centre:
+        plain = _node_table(components, out_wcs, node, jac, extent, steps, out_area, False)
+        e_plain = _table_integral(plain, extent, steps, band, pix)
+        total = float(broad.sum() / plain.sum())
+    table = np.load(path, mmap_mode="r+")
+    table[index // table.shape[1], index % table.shape[1], 0] = broad
+    table.flush()
+    return e_broad, a_broad, e_plain, total
 
 
-class _LegacyMosaicPSF(_old_psf.MosaicPSF):
-    """`psf.MosaicPSF` on the new store: pacs_psf.MosaicPSF (every method unchanged) reading `<mosaic>/psf/psf.json`
-    and each input map's smoothed error from `smooth/<map>/` (key `smooth`, was `lattice`).  # R3: swap"""
-
-    def __init__(self, directory, maps_root, tables=True):
-        self.directory = directory
-        pdir = os.path.join(directory, "psf")
-        with open(os.path.join(pdir, "psf.json")) as fh:
-            self.meta = json.load(fh)
-        m = self.meta
-        self.shape = tuple(m["shape"])
-        self.extent, self.subpixel_steps, self.integration_order = m["extent"], m["subpixel_steps"], m["integration_order"]
-        self.n_sub = m["n_sub"]
-        self.table_half = m.get("table_half")
-        self.out_wcs = WCS(fits.Header.fromstring(m["out_header"])).celestial
-        self._maps = []
-        for q in m["maps"]:
-            self._maps.append(dict(wcs=WCS(fits.Header.fromstring(q["wcs_header"])).celestial, shape=tuple(q["shape"]),
-                                   lat=_smooth_dense(os.path.join(directory, q["smooth"])), step=q["smooth_step"],
-                                   scale=q["scale"], sub=q["sub"], bbox=q["bbox"], path=q["path"], hdus=q["hdus"]))
-        self.maps_root = str(maps_root)
-        self.fbar = np.array(m["fbar"])
-        self.enclosed = np.array(m["enclosed_sub"])
-        self.aperture_fraction_sub = np.array(m["aperture_fraction_sub"])
-        self.sub_beams = np.array(m["sub_beams"])
-        if tables:
-            self.subs = [np.load(os.path.join(pdir, f"sub{k}.npy"), mmap_mode="r") for k in range(self.n_sub)]
-            self.table = np.load(os.path.join(pdir, "table.npy"), mmap_mode="r")
-
-
-def _build_mosaic_psf(config, region, band, header_text, shape, kept, meta_maps, image, mdir, n_jobs=None):
-    """`psf.build_mosaic_psf`: pacs_fit.build_mosaic_psf (pacs_fit.py:1581-1676) line for line, on the new store
-    (psf/ for _psf/, map entries' `smooth`/`smooth_step` for `lattice`/`lattice_step`, the image TiledLayer's point
-    reads for the dense image). Same tables, bit for bit.  # R3: swap"""
+def build_mosaic_psf(config, region: str, band: str, header_text: str, shape: Tuple[int, int], kept: Sequence,
+                     meta_maps: Sequence[dict], image: TiledLayer, mdir: str, n_jobs: Optional[int] = None) -> psf.MosaicPSF:
+    """Writes the mosaic's PSF store `<mdir>/psf/` (psf.json, sub<k>.npy per sub-group, table.npy) and returns it opened.
+    Inputs: the grid's header text and shape, the kept input records, META's map entries (path, group, smooth,
+    smooth_step) in META order, the image layer (the fbar sample reads its finiteness at 40 x 40 grid points). Sub-groups:
+    the PSF groups split by input pixel scale and axis orientation (FROZEN 7, angle from the Jacobian at the grid centre);
+    FROZEN 5 node count (odd, the centre node normalises with `aperture_eef / centre's plain-table enclosed integral`),
+    FROZEN 14 node layout; table half-width as the fit box needs it; the (sub-group, node) tables built in parallel
+    (joblib, n_jobs). Identity: `pacs_fit.build_mosaic_psf` (pacs_fit.py:1581-1676) bit-identical, on the new store."""
     recs = {r.path: r for r in kept}
     full_wcs = WCS(fits.Header.fromstring(header_text))          # as pacs_mosaic.Mosaic.wcs
     out_wcs = full_wcs.celestial
@@ -324,7 +328,7 @@ def _build_mosaic_psf(config, region, band, header_text, shape, kept, meta_maps,
     for q in meta_maps:
         rec = recs[q["path"]]
         in_wcs = grid.celestial_wcs(rec.wcs_header)
-        jac = _old_fit._jacobian(out_wcs, in_wcs, cx, cy)
+        jac = _jacobian(out_wcs, in_wcs, cx, cy)
         angle = float(np.degrees(np.arctan2(jac[1, 0], jac[0, 0])) % 90.0)
         key = grid.subgroup_key(q["group"], rec.pixel_scale_arcsec, angle)
         if key not in keys:
@@ -337,18 +341,18 @@ def _build_mosaic_psf(config, region, band, header_text, shape, kept, meta_maps,
     n_sub = len(keys)
     rep = [next(r for r, e in zip(meta_maps, entries) if e["sub"] == k) for k in range(n_sub)]
     rep_rec = [recs[q["path"]] for q in rep]
-    beams = np.array([_beam_fwhm_arcsec(r) for r in rep_rec])
+    beams = np.array([psf.beam_fwhm_arcsec(r) for r in rep_rec])
     pdir = os.path.join(mdir, "psf")
     os.makedirs(pdir, exist_ok=True)
     _assert_inside_derived(config, pdir)
     meta = dict(region=region, rep=[entries.index(next(e for e in entries if e["sub"] == k)) for k in range(n_sub)],
                 shape=[ny, nx], n_sub=n_sub, keys=[list(k) for k in keys], maps=entries,
                 out_header=full_wcs.to_header(relax=True).tostring(sep=""),
-                extent=0.0, subpixel_steps=_old_fit.PSF_SUBPIXEL_STEPS, integration_order=8, fbar=[1.0 / n_sub] * n_sub,
+                extent=0.0, subpixel_steps=PSF_SUBPIXEL_STEPS, integration_order=8, fbar=[1.0 / n_sub] * n_sub,
                 enclosed_sub=[1.0] * n_sub, aperture_fraction_sub=[1.0] * n_sub, sub_beams=[float(b) for b in beams])
     with open(os.path.join(pdir, "psf.json"), "w") as fh:
         json.dump(meta, fh)
-    probe = _LegacyMosaicPSF(mdir, maps_root(config), tables=False)
+    probe = psf.MosaicPSF(mdir, maps_root(config), tables=False)
     gx, gy = np.meshgrid(np.linspace(0, nx - 1, 40), np.linspace(0, ny - 1, 40))
     f = probe.weights(gx.ravel(), gy.ravel())
     valid = np.isfinite(image[np.rint(gy.ravel()).astype(int), np.rint(gx.ravel()).astype(int)])
@@ -358,7 +362,7 @@ def _build_mosaic_psf(config, region, band, header_text, shape, kept, meta_maps,
     half = int(np.ceil(max(FIT_BOX_FWHM * beam_px, APERTURES[band][2] / pix + 1.0)))
     table_half = int(min(half + np.ceil(NEIGHBOUR_REACH_FWHM * beam_px), PSF_TABLE_HALF_ARCSEC // pix))
     extent = table_half + 0.5
-    steps = _old_fit.PSF_SUBPIXEL_STEPS
+    steps = PSF_SUBPIXEL_STEPS
     count = int(2 * extent * steps) + 1
     n_nodes = grid.psf_node_count(nx, ny, pix)
     nodes = [(sx, sy) for sy in grid.psf_node_positions(ny, n_nodes) for sx in grid.psf_node_positions(nx, n_nodes)]
@@ -368,11 +372,11 @@ def _build_mosaic_psf(config, region, band, header_text, shape, kept, meta_maps,
     for k in range(n_sub):
         _assert_inside_derived(config, paths[k])
         open_memmap(paths[k], mode="w+", dtype=np.float32, shape=(n_nodes, n_nodes, 1, count, count)).flush()
-        comps.append(_published_components(config, rep_rec[k]))
+        comps.append(psf.published_components(config, rep_rec[k]))
     in_wcs = [grid.celestial_wcs(r.wcs_header) for r in rep_rec]
     centre = (n_nodes ** 2) // 2
     done = Parallel(n_jobs=n_jobs or config.n_jobs)(
-        delayed(_old_fit._mosaic_node)(comps[k], out_wcs, in_wcs[k], node, extent, steps, out_area, band, pix, paths[k],
+        delayed(_mosaic_node)(comps[k], out_wcs, in_wcs[k], node, extent, steps, out_area, band, pix, paths[k],
                                        i, i == centre)
         for k in range(n_sub) for i, node in enumerate(nodes))
     enclosed = np.zeros((n_sub, n_nodes, n_nodes))
@@ -380,7 +384,7 @@ def _build_mosaic_psf(config, region, band, header_text, shape, kept, meta_maps,
     totals = []
     for k in range(n_sub):
         res = done[k * n_nodes ** 2:(k + 1) * n_nodes ** 2]
-        scale = _aperture_eef(config, rep_rec[k]) / res[centre][2]
+        scale = psf.aperture_eef(config, rep_rec[k]) / res[centre][2]
         totals.append(res[centre][3])
         enclosed[k] = np.array([r[0] for r in res]).reshape(n_nodes, n_nodes) * scale
         aperture[k] = np.array([r[1] for r in res]).reshape(n_nodes, n_nodes) * scale
@@ -398,7 +402,7 @@ def _build_mosaic_psf(config, region, band, header_text, shape, kept, meta_maps,
                 table_half=table_half)
     with open(os.path.join(pdir, "psf.json"), "w") as fh:
         json.dump(meta, fh)
-    return _LegacyMosaicPSF(mdir, maps_root(config))
+    return psf.MosaicPSF(mdir, maps_root(config))
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -463,8 +467,8 @@ def resample_window(input_map: "psf.InputMap", pixel_grid: PixelGrid, y0: int, y
     ix0, ix1 = int(np.floor(px[inside].min())), int(np.floor(px[inside].max())) + 2
     iy0, iy1 = int(np.floor(py[inside].min())), int(np.floor(py[inside].max())) + 2
     ix1, iy1 = min(ix1, nx), min(iy1, ny)
-    img, err, cov = _read_layers(input_map, slice(iy0, iy1), slice(ix0, ix1))           # R3: swap -> input_map.layers
-    good = _good(img, err, cov)
+    img, err, cov = input_map.layers(slice(iy0, iy1), slice(ix0, ix1))
+    good = psf.good_pixels(img, err, cov)
     wx, wy = np.where(inside, px, 0.0) - ix0, np.where(inside, py, 0.0) - iy0
     xi = np.clip(np.floor(wx).astype(np.int64), 0, max(img.shape[1] - 2, 0))
     yi = np.clip(np.floor(wy).astype(np.int64), 0, max(img.shape[0] - 2, 0))
@@ -485,7 +489,7 @@ def resample_window(input_map: "psf.InputMap", pixel_grid: PixelGrid, y0: int, y
     acc["factor"] = tan_area_factor(out_wcs, X, Y)
     acc["valid"] = valid
     if with_smooth:
-        s = _smoothed_error_at(input_map, np.where(inside, px, 0.0), np.where(inside, py, 0.0)) * scale  # R3: swap
+        s = input_map.smoothed_error_at(np.where(inside, px, 0.0), np.where(inside, py, 0.0)) * scale
         acc["smooth"] = s
         acc["valid"] = valid & np.isfinite(s) & (s > 0)
     return acc
@@ -703,7 +707,7 @@ def build_mosaic(config, region: str, band: str, box: Optional[Sequence[float]] 
     smooth_dirs = [os.path.join(outdir, _smooth_name(r)) for r in kept]
     for d in smooth_dirs:
         _assert_inside_derived(config, d)
-    pool(delayed(_build_smoothed_error)(im, d) for im, d in zip(plain, smooth_dirs))     # R3: swap
+    pool(delayed(psf.build_smoothed_error)(im, d) for im, d in zip(plain, smooth_dirs))
     inputs = [psf.InputMap(r, im.wcs, root, TiledLayer.open(d, "r"), grid.smooth_step_px(r.pixel_scale_arcsec))
               for r, im, d in zip(kept, plain, smooth_dirs)]
     # the tiles any input footprint touches
@@ -735,7 +739,7 @@ def build_mosaic(config, region: str, band: str, box: Optional[Sequence[float]] 
     pair_d = {k: float(np.median(np.concatenate(pair_vals[k]))) for k in pair_n}
     del pair_vals
     offsets = solve_zero_levels([r.path for r in kept], npix, pair_n, pair_d)
-    beam = {r.path: _beam_fwhm_arcsec(r) for r in kept}
+    beam = {r.path: psf.beam_fwhm_arcsec(r) for r in kept}
     to_mjy = {p: 1e3 * 1.1331 * (beam[p] / PIXEL_ARCSEC[band]) ** 2 for p in beam}       # Jy/pixel -> mJy/beam
     pairs_meta = [dict(a=a, b=b, d=pair_d[(a, b)], n=pair_n[(a, b)], residual=pair_d[(a, b)] - (offsets[a] - offsets[b]))
                   for a, b in pair_n]
@@ -771,7 +775,7 @@ def build_mosaic(config, region: str, band: str, box: Optional[Sequence[float]] 
                 reading={name: _LAYER_TEXT[name][1] + " " + reading for name in LAYERS})
     _write_meta(config, outdir, meta)
     image = TiledLayer.open(os.path.join(outdir, "image"), "r")
-    _build_mosaic_psf(config, region, band, header_text, (ny, nx), kept, maps_meta, image, outdir, n_jobs)  # R3: swap
+    build_mosaic_psf(config, region, band, header_text, (ny, nx), kept, maps_meta, image, outdir, n_jobs)
     m = Mosaic(config, region, band, box)
     m.neighbours()                      # computed once, stored in META
     return m
@@ -1224,7 +1228,7 @@ class Mosaic:
         f = self.meta.get("floors")
         self.floors = (Floors(float(f["coverage"]), float(f["error_fraction"])) if f is not None
                        else _floors(self.layers["coverage"], self.grid))
-        self.psf = _LegacyMosaicPSF(self.dir, maps_root(config), tables=psf_tables)          # R3: swap -> psf.MosaicPSF
+        self.psf = psf.MosaicPSF(self.dir, maps_root(config), tables=psf_tables)
         paths = {q["path"] for q in self.meta.get("maps", ())}
         obsids = tuple(sorted({str(o) for r in read_index(config, region) if r.path in paths for o in r.obsids}))
         self.record = MapRecord(map_id="mosaic_%s_%s" % (region.replace(" ", "_"), band), obsids=obsids, band=band,
@@ -1247,6 +1251,15 @@ class Mosaic:
         self._neighbours = None
         self._tree = None
         self._outer_cache = None
+
+    @property
+    def inputs(self) -> List[psf.InputMap]:
+        """The mosaic's input maps in META order (record from the region's index, celestial WCS; no smoothed error)."""
+        if getattr(self, "_inputs", None) is None:
+            recs = {r.path: r for r in read_index(self.config, self.region)}
+            self._inputs = [psf.InputMap(recs[q["path"]], grid.celestial_wcs(recs[q["path"]].wcs_header),
+                                         maps_root(self.config)) for q in self.meta.get("maps", ())]
+        return self._inputs
 
     def __getstate__(self):
         config = self._args[0]

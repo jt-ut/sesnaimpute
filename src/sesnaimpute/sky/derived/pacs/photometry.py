@@ -22,9 +22,6 @@ What this module reads of its inputs (the contract's BandCompleteness is the car
   .shift (east, north, n_pairs); BandCompleteness.scatter. Mosaic: .psf (MosaicPSF: beam_at_sky, sub_beams), .cells
   (CellGrid), .xy, .aperture, .fitted_fwhm, .beam_at, .inputs (the input maps: record, wcs). An empty band (no mosaic) is
   simply absent from `mosaics`.
-
-The `_OldMosaic` adapter at the end wraps the old pacs_fit.Tile so that the functions can run while mosaic.py/detect.py/
-inject.py are skeletons (`# R3: swap`: delete it and the `isinstance(..., _OldMosaic)` branches).
 """
 
 from __future__ import annotations
@@ -39,7 +36,7 @@ from scipy.spatial import cKDTree
 
 from sesnaimpute import pieces as pieces_module
 from sesnaimpute.definitions import PACS_BANDS as BANDS
-from sesnaimpute.sky.derived.pacs import detect, grid
+from sesnaimpute.sky.derived.pacs import detect, grid, inject
 from sesnaimpute.sky.derived.pacs.inject import BandCompleteness
 from sesnaimpute.sky.derived.pacs.mosaic import Mosaic
 
@@ -158,9 +155,6 @@ def _pair_scatter(pa, pb, mosaic_red: Mosaic) -> Tuple[float, int]:
 
 def _filtered(m, x, y, offset_cell):
     """The detection estimator at map pixels (detect.filtered)."""
-    if isinstance(m, _OldMosaic):                                    # R3: swap
-        from sesnaimpute.sky.derived import pacs_completeness
-        return pacs_completeness.filtered(m.tile, x, y, offset_cell)
     return detect.filtered(m, x, y, offset_cell)
 
 
@@ -253,7 +247,9 @@ def merge_sources(config, bands: Dict[str, BandCompleteness], mosaics: Dict[str,
         extended[b][k] = ext
         offset[b][k[hit]] = bands[b].detection.cells.offset[row[hit]]
         if hit.any():
-            sigma[b][k[hit]] = calibrated_sigma(bands[b].scatter[row[hit]], flux_grid_mjy, f[hit])
+            eps = inject.eps_rows(bands[b].eps_flux, bands[b].detection.cells.sigma)[row[hit]]
+            sigma[b][k[hit]] = inject.flux_sigma(calibrated_sigma(bands[b].scatter[row[hit]], flux_grid_mjy, f[hit]), eps,
+                                                 f[hit])
     for b in BANDS:
         s = src[b] >= 0
         at = np.maximum(src[b], 0)
@@ -454,8 +450,6 @@ def _origin_counts(photometry: ForcedPhotometry) -> dict:
 
 def _input_footprints(m) -> List[tuple]:
     """(name, WCS, (ny, nx)) of each input map of a mosaic."""
-    if isinstance(m, _OldMosaic):                                    # R3: swap
-        return m.footprints()
     return [(os.path.basename(i.record.path), i.wcs, tuple(i.record.shape)) for i in m.inputs]
 
 
@@ -479,67 +473,3 @@ def registration_offsets(photometry: ForcedPhotometry, mosaics: Dict[str, Mosaic
                 result[b].append((name, int(inside.sum()), float(np.median(pairs[inside, 0])),
                                   float(np.median(pairs[inside, 1]))))
     return result
-
-
-# ---------------------------------------------------------------------------
-# R3: swap -- the old build's tile behind the Mosaic interface used above
-
-class _OldMosaic:
-    """`pacs_fit.Tile` of the old build's prepared mosaic, with the attributes of `mosaic.Mosaic` this module and checks.py
-    use (`band`, `psf`, `cells`, `xy`, `aperture`, `fitted_fwhm`, `beam_at`, `record`, `tile`). R3: delete (and the
-    `isinstance(..., _OldMosaic)` branches) once mosaic.py, detect.py and inject.py are filled."""
-
-    def __init__(self, config, region: str, band: str, box=None):
-        from sesnaimpute.sky.derived import pacs_fit
-        self.config, self.region, self.band, self.box = config, region, band, box
-        self.record = pacs_fit.mosaic_record(config, region, band, box)
-        self.tile = pacs_fit.cached_tile(config, self.record)
-        self.psf = self.tile._psf
-        self.cells = self.tile.grid
-        self.pixel_arcsec = self.tile.pixel_arcsec
-
-    def xy(self, ra_deg, dec_deg):
-        return self.tile.xy(ra_deg, dec_deg)
-
-    def aperture(self, x, y, window=None, chunk=2048):
-        if window is None:
-            return self.tile.aperture(x, y, chunk=chunk)
-        rows = np.array(self.tile.image[window.y0:window.y0 + window.image.shape[0]])
-        rows[:, window.x0:window.x0 + window.image.shape[1]] = window.image
-        return self.tile.aperture(x, y, chunk=chunk, image=rows, row0=window.y0)
-
-    def window(self, y0, y1, x0, x1):
-        from sesnaimpute.sky.derived.pacs.mosaic import Window
-        ny, nx = self.tile.shape
-        y0, y1, x0, x1 = max(y0, 0), min(y1, ny), max(x0, 0), min(x1, nx)
-        return Window(y0, x0, np.array(self.tile.image[y0:y1, x0:x1]), np.array(self.tile.error[y0:y1, x0:x1]))
-
-    def template_patches(self, x, y, flux, mixture=None):
-        cx, cy, resp = [], [], []
-        for a, b, r in self.tile._template_patches(x, y, flux, 256, mixture):
-            cx.append(a), cy.append(b), resp.append(r)
-        return np.concatenate(cx), np.concatenate(cy), np.concatenate(resp)
-
-    def injection_half_width(self):
-        return self.tile.injection_half_width()
-
-    def beam_px_at(self, x, y):
-        return self.tile.beam_px_at(x, y)
-
-    def fitted_fwhm(self, x, y):
-        return self.tile.fitted_fwhm(x, y)
-
-    def beam_at(self, x, y):
-        return self.tile.beam_at(x, y)
-
-    def footprints(self):
-        from astropy.io import fits
-        from astropy.wcs import WCS
-        from sesnaimpute.sky.derived import pacs_mosaic
-        from sesnaimpute.sky.download.herschel_pacs.index import read_index
-        index = {r.path: r for r in read_index(self.config, self.region)}
-        out = []
-        for q in pacs_mosaic.Mosaic(pacs_mosaic.product_dir(self.config, self.region, self.band, self.box)).meta["maps"]:
-            rec = index[q["path"]]
-            out.append((os.path.basename(q["path"]), WCS(fits.Header.fromstring(rec.wcs_header)).celestial, tuple(rec.shape)))
-        return out

@@ -6,7 +6,7 @@ service (`sky.download._tap.query_csv`, paged on the row key `cntr`). Flux in mJ
 aperture-corrected, not colour-corrected; positions on the Herschel pointing (1.2 arcsec, Sect. 5.1.3).
 
 VALIDATION-ONLY (planner ruling, owner-approved 2026-10-29): the PACS source list is the pipeline's own detection;
-HPPSC is the external check of its positions, fluxes and recovery (`sky.derived.pacs_photometry.hppsc_checks`). It
+HPPSC is the external check of its positions, fluxes and recovery (`sky.derived.pacs.checks.hppsc_checks`). It
 enters no product.
 """
 

@@ -10,7 +10,7 @@ the noise and the coverage), never by archive catalogue membership.
 `<herschel_pacs_maps>/index_herschel_pacs__<Region>.csv`; a region with no
 PACS coverage has an index with a header and no rows. `maps_root(config)`
 is the maps directory, `[inputs] herschel_pacs_maps`, no fallback. The
-downstream stages (pacs_fit, pacs_completeness, pacs_photometry) read maps
+downstream PACS stages (the package sky.derived.pacs) read maps
 only through these two functions and the record.
 
 Per-observation footprints come from the archive's cached TAP response

@@ -41,7 +41,7 @@ Store (transient, the band's work directory `records_dir`): injection records `i
 shard: row int32, plane int8, half int8, batch int32, block int32, near bool, recovered bool, dflux float32, flux float32,
 det_flux float32, det_dist float32, lnr float32; the designated round-0 piece of each block also carries the per-cell
 coverage table cell_row, cell_cov_mean, cell_cov_max, cell_cov_min; scalars seconds_inject, seconds_aperture,
-n_detected, check), written by the caller (stages.write_record; here `_write_record` until round 3); the band's record
+n_detected, check), written by the caller (stages.write_record, one root dataset per column); the band's record
 table `table.hdf5` (both halves sorted by row with per-row offsets, far-injection counts per (row, plane), the per-row
 coverage, the held-out half and the statistics; `build_table`) that the pooling blocks read; no pickles.
 """
@@ -49,7 +49,6 @@ coverage, the held-out half and the statistics; `build_table`) that the pooling 
 from __future__ import annotations
 
 import glob
-import hashlib
 import json
 import os
 import re
@@ -70,13 +69,13 @@ from sesnaimpute.definitions import PACS_MIN_INJECTIONS as MIN_INJECTIONS
 from sesnaimpute.definitions import PACS_POOL_ARCSEC as POOL_ARCSEC
 from sesnaimpute.definitions import PACS_POOL_WIDENINGS as POOL_WIDENINGS
 from sesnaimpute.definitions import PACS_SNR_BIN_EDGES as SNR_BIN_EDGES
-from sesnaimpute.sky.derived.pacs import detect, mosaic
+from sesnaimpute.sky.derived.pacs import detect, grid, mosaic
 from sesnaimpute.sky.derived.pacs.detect import BandDetection, CellStats, Kernel, Peaks
 from sesnaimpute.sky.derived.pacs.grid import CELL_ARCSEC, INJECTION_BLOCK_LINES, TILE, CellGrid
-from sesnaimpute.sky.derived.pacs.mosaic import Mosaic, Window
+from sesnaimpute.sky.derived.pacs.mosaic import Mosaic
 
 # ----------------------------------------------------------------------------------------------------------------------
-# constants (moved unchanged from pacs_completeness.py; deleted there in round 3)
+# constants (moved unchanged from the retired pacs_completeness.py)
 
 #: PACS has no Vega system: zero point 1 Jy, m = -2.5 log10(F / 1 Jy)
 ZERO_POINT_JY = 1.0
@@ -104,18 +103,26 @@ POOL_BLOCK_CELLS = 8
 REAL_CHECK_POSITIONS = 200
 #: the real-map report's seed plane
 REAL_CHECK_SEED = 99999
-#: the recovery radius is MATCH_SIGMAS x the detection's position scatter at the injection's S/N (detect's constant;
-#: R3: swap to detect.MATCH_SIGMAS once detect.py defines it)
-MATCH_SIGMAS = 3.0
-#: the catalogue's detection threshold in S/N (R3: swap to the detect/mosaic constant)
-DETECTION_SNR = 5.0
 #: the pooling parameters ruled by the science track (FIX_SPEC sec 8, 12; M1, M3)
 NOISE_WINDOW = 1.5
 EDGE_RATIO = 2.0
 GRADIENT_BOUNDARY = 0.03
 #: the all-cell pool is used with fewer than MIN_INJECTIONS far injections only when the whole map holds fewer (a
-#: median and a MAD need two values); never reached on the gate set
+#: median and a MAD need two values); never reached on the gate set (the legacy-free rules below never use it for a
+#: cell with a noise window)
 MAP_MIN = 2
+#: the completed fallback of the "widen" rule (owner 2026-10-31 after M8: on IRAS 20050 P70 the all-cell pool put noisy
+#: cell-planes with quiet cells and re-introduced the under-statement): after the window has been widened to the whole
+#: map, a cell-plane takes the window class over the whole map if it holds at least FALLBACK_MIN far injections there;
+#: else SCATTER_all(plane) x R_class, R_class = MAD(z of the window class) / MAD(z of the map), each over ALL planes of
+#: the map (the excess is constant across S/N: S140, Taurus, Aquila, M8), so a class of a few dozen cells still gives
+#: thousands of residuals. Never the plain all-cell pool for a cell with a noise window.
+FALLBACK_MIN = 30
+#: owner 2026-10-31 (after M7): the injection rounds continue for a cell until the sampling error of its FLUX90 (from
+#: its pooled counts and the curve's local slope at the 0.9 crossing, `flux90_precision`) is at most this, relative. The
+#: big maps (slope ~1.5 per dex, ~130 pooled injections: 0.040) add no rounds; a map at slope 1.1 per dex needs ~160.
+#: The MIN_INJECTIONS floor and the MAX_EXTRA_BATCHES cap are unchanged; the legacy rule keeps the floor alone.
+FLUX90_PRECISION = 0.05
 #: the S/N planes pooled (36)
 N_PLANES = int(round((SNR_LOG_MAX - SNR_LOG_MIN) / SNR_LOG_STEP)) + 1
 
@@ -261,8 +268,7 @@ class Injector:
     recovered = nearest peak within the recovery radius and brighter than any real source there; near = within
     BLEND_RADIUS_BEAMS x beam of a real detection). Per-worker memory: one tile window + per-row arrays (no
     n_cells-sized array: the old row_of_cell is a search on the sorted row ids).
-    `layers`: the band's detection layers (detect.open_detection) that `detect.window_peaks` reads (contract change:
-    the contract's signature has no way to reach them).
+    `layers`: the band's detection layers (detect.open_detection) that `detect.window_peaks` reads.
     Identity: `pacs_completeness.Injector` (pacs_completeness.py:832-1017): bit-identical records for the same
     (seed_key, plane, batch, half, block)."""
 
@@ -309,9 +315,8 @@ class Injector:
 
     # -- positions
     def _draw(self, rng, rows, n):
-        """n positions, each uniform inside the cell of a randomly chosen row of `rows`."""
-        x0, x1, y0, y1 = self.cells.bounds(self.ids[rows[rng.integers(0, rows.size, n)]])
-        return x0 + (x1 - x0) * rng.random(n), y0 + (y1 - y0) * rng.random(n)
+        """n positions, each uniform inside the cell of a randomly chosen row of `rows` (detect._draw)."""
+        return detect._draw(self.cells, self.ids, rng, rows, n)
 
     def _valid(self, x, y):
         """Positions inside a row's cell, on a pixel of usable data (the reader's error mask)."""
@@ -322,24 +327,8 @@ class Injector:
         return ok
 
     def _thin(self, x, y, limit):
-        """Greedy selection, in order, of at most `limit` positions no two closer than the separation."""
-        n = x.size
-        if n == 0:
-            return np.zeros(0, np.int64)
-        pairs = cKDTree(np.c_[x, y]).query_pairs(self.separation_px, output_type="ndarray").reshape(-1, 2)
-        both = np.concatenate([pairs, pairs[:, ::-1]])
-        both = both[np.argsort(both[:, 0], kind="stable")]
-        edges = np.searchsorted(both[:, 0], np.arange(n + 1))
-        removed = np.zeros(n, bool)
-        chosen = []
-        for i in range(n):
-            if removed[i]:
-                continue
-            chosen.append(i)
-            if len(chosen) >= limit:
-                break
-            removed[both[edges[i]:edges[i + 1], 1]] = True
-        return np.asarray(chosen, np.int64)
+        """Greedy selection, in order, of at most `limit` positions no two closer than the separation (detect._thin)."""
+        return detect._thin(x, y, limit, self.separation_px)
 
     def positions(self, rng, rows):
         """One batch's positions over the valid pixels of the cells of `rows`, one per SEPARATION_AREAS squared
@@ -363,11 +352,11 @@ class Injector:
         return snr * self.sigma[_rows_of(self.ids, self.cells.cell_ids(x, y))]
 
     def recovery_radius_px(self, snr, x, y):
-        """MATCH_SIGMAS x the detection's position scatter at S/N `snr`, between one pixel and half the local beam."""
+        """detect.MATCH_SIGMAS x the detection's position scatter at S/N `snr`, between one pixel and half the local beam."""
         half_beam = 0.5 * self.m.beam_px_at(x, y)
         if not np.isfinite(self.pos_k_px):
             return half_beam
-        return np.clip(MATCH_SIGMAS * self.pos_k_px / max(snr, 1e-3), 1.0, half_beam)
+        return np.clip(detect.MATCH_SIGMAS * self.pos_k_px / max(snr, 1e-3), 1.0, half_beam)
 
     def batch(self, rng: np.random.Generator, rows: np.ndarray, snr: float) -> dict:
         """One batch: positions (`positions`), fluxes, the measurement (`measure_positions`). Returns the record
@@ -474,8 +463,7 @@ def _band_of(m) -> str:
 
 class _Operations:
     """The mosaic and detection operations the injection uses (window, template_patches, paste, aperture, peaks,
-    coverage), bound once per Injector: the contract's mosaic/detect functions, or the round-2 adapter to the old
-    modules (`_OldMosaic`; R3: swap)."""
+    coverage), bound once per Injector."""
 
     def __init__(self, m):
         self.m = m
@@ -486,14 +474,13 @@ class _Operations:
         self.paste = mosaic.paste
 
     def peaks(self, inj: "Injector", x, y, r, flux, win):
-        """(found, xc, yc, fnu, distance) of the nearest peak within r (contract change: the contract's docstring
-        names the fifth return value snr; the identity is the old distance)."""
+        """(found, xc, yc, fnu, distance) of the nearest peak within r."""
         return detect.window_peaks(self.m, inj.layers, x, y, r, inj.m_offset_cell, inj.m_sigma_cell, inj.offset_cell,
                                    flux=flux, window=win)
 
 
 def _operations(m) -> "_Operations":
-    return m.operations() if isinstance(m, _OldMosaic) else _Operations(m)   # R3: swap (drop the adapter branch)
+    return _Operations(m)
 
 
 def _real_map_ratios(inj: Injector, flux_mjy: float, half: int, rows: Optional[np.ndarray] = None) -> np.ndarray:
@@ -531,6 +518,8 @@ def _injector(m: Mosaic, detection: BandDetection, layers: Optional[dict] = None
     if _INJECTOR.get("key") != key:
         _INJECTOR.clear()
         _INJECTOR.update(key=key, injector=Injector(m, detection, 1, layers=layers))
+    elif layers is not None and _INJECTOR["injector"].layers is None:
+        _INJECTOR["injector"].layers = layers            # built without them (first_batches), now given
     return _INJECTOR["injector"]
 
 
@@ -565,19 +554,25 @@ def _chunks(jobs, n_rows):
     return [[jobs[i] for i in c] for c in np.array_split(np.arange(len(jobs)), k) if c.size]
 
 
-def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[int], np.ndarray]) -> List[InjectionTask]:
+def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[int], np.ndarray],
+                rule: Optional["PoolingRule"] = None, load_recovered: Optional[Callable[[int], np.ndarray]] = None
+                ) -> List[InjectionTask]:
     """The ordered pieces of round `r` ([] when the band is complete): round 0 = `first` batches in every block for every
-    (plane, half); each later round one more batch per pair over the cells within the pooling radius of a cell whose
-    pooled count (all earlier rounds) is short of MIN_INJECTIONS, up to MAX_EXTRA_BATCHES. `load(q)`: the (rows x pairs)
-    counts of round q's records (`record_counts`; dense or sparse). Identity: `pacs_completeness.round_task_list`
-    (pacs_completeness.py:1258) -- same tasks in the same order (the old (tile index, inputs) fields drop: one mosaic per
-    band)."""
+    (plane, half); each later round one more batch per pair over the cells within the pooling radius of a cell that is
+    SHORT, up to MAX_EXTRA_BATCHES. Short: a pair whose pooled count (all earlier rounds) is below MIN_INJECTIONS (the
+    floor, every rule); and, under a non-legacy `rule` with `load_recovered`, the planes around a cell's 0.9 crossing
+    whose FLUX90 sampling error exceeds FLUX90_PRECISION (`_imprecise`, owner 2026-10-31). `load(q)`, `load_recovered(q)`:
+    the (rows x pairs) counts of round q's records and of their recovered ones (`record_counts`; dense or sparse).
+    Identity (legacy rule or none): `pacs_completeness.round_task_list` (pacs_completeness.py:1258) -- same tasks in the
+    same order (the old (tile index, inputs) fields drop: one mosaic per band)."""
+    precise = rule is not None and not rule.is_legacy and load_recovered is not None
     pairs = injection_pairs()
     ids = np.asarray(detection.cells.ids, np.int64)
     blocks = injection_blocks(ids, detection.cell_grid.nx)
     W = pool_matrices(detection.cell_grid, ids, np.zeros(ids.size, np.int8), PoolingRule.legacy(),
                       widenings=POOL_WIDENINGS[:1])[0]
     count = np.zeros((ids.size, len(pairs)))
+    recovered = np.zeros((ids.size, len(pairs)))
     tasks = []
     for i, blk in enumerate(blocks):
         jobs = [(p, half, tuple(range(first)), None) for p, half in pairs]
@@ -588,10 +583,15 @@ def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[in
             return []
         q = load(extra)
         count += q.toarray() if hasattr(q, "toarray") else np.asarray(q)
+        if precise:
+            q = load_recovered(extra)
+            recovered += q.toarray() if hasattr(q, "toarray") else np.asarray(q)
         tasks = []
         if extra == MAX_EXTRA_BATCHES:
             break
         short = (W @ count) < MIN_INJECTIONS
+        if precise:
+            short |= _imprecise(W @ count, W @ recovered)
         act = short.any(axis=0)
         if not act.any():
             continue
@@ -602,6 +602,52 @@ def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[in
             for c in (_chunks(jobs, r1 - r0) if jobs else []):
                 tasks.append(InjectionTask(b, (r0, r1), tuple(c), False))
     return tasks if r <= MAX_EXTRA_BATCHES else []
+
+
+def flux90_precision(n: np.ndarray, rec: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per row and half, from pooled counts `n` and recovered `rec` (rows x pairs, pair = 2 plane + half): the relative
+    sampling error of FLUX90, ln(10) sqrt(p (1 - p) / n_x) / s, p = FLUX90_FRACTION, n_x the smaller pooled count of the
+    two planes bracketing the 0.9 crossing, s = dfrac/dlog10 F over the planes one below to one above them (the curve's
+    local slope; S/N planes are SNR_LOG_STEP dex apart, so log10 F steps alike at fixed CELL_SIGMA) -- M5/M7's arithmetic.
+    Returns (error (rows, 2), crossing plane k (rows, 2; -1 where the pooled curve does not cross 0.9 upward), n_x).
+    NaN error where there is no crossing or a flat slope."""
+    n = np.asarray(n, float).reshape(n.shape[0], N_PLANES, 2)
+    rec = np.asarray(rec, float).reshape(n.shape[0], N_PLANES, 2)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        frac = np.where(n > 0, rec / n, np.nan)
+    rows = n.shape[0]
+    err = np.full((rows, 2), np.nan)
+    kk = np.full((rows, 2), -1, np.int64)
+    nx = np.zeros((rows, 2))
+    below = frac[:, :-1, :] < FLUX90_FRACTION
+    above = frac[:, 1:, :] >= FLUX90_FRACTION
+    cross = below & above                                      # (rows, planes - 1, 2): p_k < 0.9 <= p_k+1
+    has = cross.any(axis=1)
+    k = np.where(has, cross.argmax(axis=1), -1)                # the faintest crossing
+    r, h = np.nonzero(has)
+    k0 = k[r, h]
+    lo, hi = np.maximum(k0 - 1, 0), np.minimum(k0 + 2, N_PLANES - 1)
+    slope = (frac[r, hi, h] - frac[r, lo, h]) / ((hi - lo) * SNR_LOG_STEP)
+    n_x = np.minimum(n[r, k0, h], n[r, k0 + 1, h])
+    p = FLUX90_FRACTION
+    with np.errstate(invalid="ignore", divide="ignore"):
+        e = np.log(10.0) * np.sqrt(p * (1 - p) / n_x) / slope
+    err[r, h] = np.where(slope > 0, e, np.nan)
+    kk[r, h] = k0
+    nx[r, h] = n_x
+    return err, kk, nx
+
+
+def _imprecise(n: np.ndarray, rec: np.ndarray) -> np.ndarray:
+    """(rows x pairs) True on the planes k - 1 .. k + 2 around each (row, half)'s 0.9 crossing whose FLUX90 sampling error
+    exceeds FLUX90_PRECISION: where one more batch narrows FLUX90."""
+    err, k, _n = flux90_precision(n, rec)
+    out = np.zeros((n.shape[0], N_PLANES, 2), bool)
+    r, h = np.nonzero(np.isfinite(err) & (err > FLUX90_PRECISION))
+    for d in (-1, 0, 1, 2):
+        pl = np.clip(k[r, h] + d, 0, N_PLANES - 1)
+        out[r, pl, h] = True
+    return out.reshape(n.shape[0], 2 * N_PLANES)
 
 
 def inject_task(config, m: Mosaic, detection: BandDetection, task: InjectionTask, layers: Optional[dict] = None) -> dict:
@@ -617,7 +663,7 @@ def inject_task(config, m: Mosaic, detection: BandDetection, task: InjectionTask
     seconds = dict(inject=0.0, aperture=0.0)
     check = np.zeros(0)
     if task.check:
-        f_check = 10.0 * DETECTION_SNR * float(np.median(inj.sigma))
+        f_check = 10.0 * detect.DETECTION_SNR * float(np.median(inj.sigma))
         check = np.array([float(v.mean()) if v.size else np.nan
                           for v in (_real_map_ratios(inj, f_check, half, np.arange(r0, r1)) for half in (0, 1))])
     for p, half, seeds, rows in task.jobs:
@@ -657,38 +703,12 @@ def record_counts(records: dict, n_rows: int) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# record files (R3: swap to stages.write_record / read_record: stages is to the right of inject in the import order)
-
-def _write_record(path: str, tables: Dict[str, np.ndarray], attrs: Optional[dict] = None) -> dict:
-    """An HDF5 record file written atomically (temporary name with pid, fsync, os.replace), one contiguous dataset per
-    key at the root, then its receipt `<path>.receipt.json` {size, sha256} (also atomic). Returns the receipt."""
-    tmp = "%s.tmp%d" % (path, os.getpid())
-    with h5py.File(tmp, "w") as f:
-        for k, v in tables.items():
-            f.create_dataset(k, data=np.asarray(v))
-        for k, v in (attrs or {}).items():
-            f.attrs[k] = v
-    with open(tmp, "rb+") as f:
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 22), b""):
-            h.update(chunk)
-    receipt = dict(path=os.path.basename(path), size=os.path.getsize(path), sha256=h.hexdigest())
-    rtmp = "%s.receipt.json.tmp%d" % (path, os.getpid())
-    with open(rtmp, "w") as f:
-        json.dump(receipt, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(rtmp, path + ".receipt.json")
-    return receipt
-
+# record files (stages writes each piece set's record; the band's record table below is inject's own)
 
 def _read_record(path: str, keys: Optional[Sequence[str]] = None) -> Dict[str, np.ndarray]:
+    """The root datasets of an injection record file (its groups -- counts/, checks/ -- are the stage table's)."""
     with h5py.File(path, "r") as f:
-        return {k: f[k][()] for k in (f.keys() if keys is None else keys) if k in f}
+        return {k: f[k][()] for k in (f.keys() if keys is None else keys) if k in f and isinstance(f[k], h5py.Dataset)}
 
 
 def _record_files(records_dir: str) -> List[str]:
@@ -714,8 +734,8 @@ TABLE_NAME = "table.hdf5"
 
 
 def build_table(records_dir: str, n_row: int, sigma: Optional[np.ndarray] = None) -> str:
-    """The band's record table, written once before its pooling blocks (contract change: a public step the stages
-    call; `pool_block` builds it when absent): both halves' records sorted by row (a stable sort of the records taken in
+    """The band's record table, written once before its pooling blocks (`pool_block` builds it when absent): both
+    halves' records sorted by row (a stable sort of the records taken in
     (half, plane, block, batch) order, so the table does not depend on the order the pieces finished) with `offsets`
     (n_row + 1); far-injection counts per (row, plane) of each half and gradient class (`far_h<half>_g<class>`); the
     per-row coverage (from the designated round-0 pieces); the held-out half (`held/<key>`, in the same order) and the
@@ -781,6 +801,7 @@ def build_table(records_dir: str, n_row: int, sigma: Optional[np.ndarray] = None
         f.create_dataset("near_plane", data=near_plane)
         if sigma is not None:
             f.create_dataset("fallback", data=_map_fallbacks(table, _f32(sigma), cov))
+            f.create_dataset("fallback_all", data=_map_mad_all_planes(table, _f32(sigma)))
         g = f.create_group("held")
         for k, v in held.items():
             g.create_dataset(k, data=v)
@@ -825,6 +846,29 @@ def _map_fallbacks(table: dict, sigma: np.ndarray, cov: np.ndarray) -> np.ndarra
     return out
 
 
+def _mad(v: np.ndarray) -> float:
+    """1.4826 x the median absolute deviation about the median (NaN for no value): the estimator's scatter."""
+    if not v.size:
+        return float("nan")
+    med = 0.5 * (np.partition(v, (v.size - 1) // 2)[(v.size - 1) // 2] + np.partition(v, v.size // 2)[v.size // 2])
+    a = np.abs(v - med)
+    return MAD_TO_SIGMA * 0.5 * (np.partition(a, (a.size - 1) // 2)[(a.size - 1) // 2] + np.partition(a, a.size // 2)[a.size // 2])
+
+
+def _map_mad_all_planes(table: dict, sigma: np.ndarray) -> np.ndarray:
+    """(2 sets, 3 gradient) 1.4826 MAD of z = dflux / CELL_SIGMA over the far records of the whole map and ALL planes:
+    the denominator of R_class (FALLBACK_MIN); sets both halves / build half, gradient class 0, 1, any."""
+    out = np.full((2, 3), np.nan)
+    far = ~table["near"]
+    z = table["dflux"].astype(np.float64) / sigma[table["row"].astype(np.int64)]
+    gcl = _gradient_class(table["lnr"])
+    for si, halves in enumerate(((0, 1), (0,))):
+        s_set = far & np.isin(table["half"], halves)
+        for gi in range(3):
+            out[si, gi] = _mad(z[s_set if gi == 2 else s_set & (gcl == gi)])
+    return out
+
+
 def held_and_stats(detection: BandDetection, records_dir: str) -> Tuple[dict, dict]:
     """(held-out half, statistics) of a band, what `assemble_band` takes: the record table built when absent
     (`build_table` with the band's CELL_SIGMA, so the "widen" rule's map-wide values are present), then read."""
@@ -833,12 +877,16 @@ def held_and_stats(detection: BandDetection, records_dir: str) -> Tuple[dict, di
 
 
 def read_held(records_dir: str) -> Tuple[dict, dict]:
-    """(held-out half, statistics) of a band from its record table (`build_table`): what `assemble_band` takes
-    (contract change: public; the old held/meta came from meta.pkl)."""
+    """(held-out half, statistics) of a band from its record table (`build_table`): what `assemble_band` takes. The held
+    dict also carries the build half's records (build_row, build_plane, build_recovered) for the C1 bar."""
     with h5py.File(os.path.join(records_dir, TABLE_NAME), "r") as f:
         held = {k: f["held"][k][()] for k in f["held"]}
         stats = json.loads(f.attrs["stats"])
         stats["near_plane"] = f["near_plane"][()]
+        # the build half's records (checks.completeness_c1's derived bar: S_hat from both halves' counts)
+        build = f["half"][()] == 0
+        held.update(build_row=f["row"][()][build], build_plane=f["plane"][()][build],
+                    build_recovered=f["recovered"][()][build])
     return held, stats
 
 
@@ -898,16 +946,38 @@ def _open_table(records_dir: str, n_row: int, sigma: Optional[np.ndarray] = None
 # ----------------------------------------------------------------------------------------------------------------------
 # pooling and the estimator
 
+#: the flux-proportional error term (FIX_SPEC sec 12; science M1/M6 variance fits; brief R2 C2): per noise class, per band,
+#: per map, SIGMA^2 = (CELL_SIGMA x SCATTER)^2 + (EPS_FLUX x F)^2, fitted on the BUILD half under every non-legacy rule.
+#: Noise classes as C2 reads them: a cell is noisy where its CELL_SIGMA exceeds this factor x its map's median CELL_SIGMA.
+FLUX_TERM_NOISY_FACTOR = 2.0
+FLUX_TERM_CLASSES = ("quiet", "noisy")
+#: a plane enters the fit with at least this many build-half residuals (the C2 bar's own count, checks.C2_MIN_RESIDUALS)
+FLUX_TERM_MIN_RESIDUALS = 200
+#: the 16-84 % interval of EPS_FLUX: Poisson bootstrap over cells (whole cells, so neighbouring injections stay together)
+FLUX_TERM_BOOTSTRAP = 200
+FLUX_TERM_SEED = 20261031
+EPS_FLUX_DATASET = "EPS_FLUX_%s"
+EPS_FLUX_UNITS = "relative flux (a fraction of the source flux; dimensionless)"
+EPS_FLUX_READING = ("The part of a source's flux error that grows in proportion to the source's flux, one value per noise "
+                    "class (quiet, noisy: a cell is noisy where its noise exceeds twice the map's median). A source's "
+                    "total error is the square root of (the cell's error from the artificial-source scatter)^2 + "
+                    "(EPS_FLUX x its flux)^2.")
+
 POOLING_CLASSES = ("none", "window", "window_edge", "window_gradient")
 #: PRODUCTION estimator (owner's ruling 2026-10-31): pool only cells with CELL_SIGMA within x1.5 of the target's
-#: (the window restores the ruled calibration of noisy cells on their own residuals, FIX_SPEC sec 8, 12); the
-#: coverage-edge class is NOT used (measured to add <= 0.013 to the noisy-bin scatter ratio)
+#: (the window restores the ruled calibration of noisy cells on their own residuals, FIX_SPEC sec 8, 12). Measured (M1,
+#: Taurus/Aquila P100 held-out C2): noisy bins 1.104-1.216 -> 1.044-1.060 / 1.066-1.166 -> 1.030-1.063, quiet within
+#: 0.008; the coverage-edge class is NOT used (it adds <= 0.013). M7: the window also removes the within-pool spread of
+#: ln CELL_SIGMA (0.33-0.55 vs 0.11) that flattens the tiny maps' curves.
 PRODUCTION_POOLING_CLASS = "window"
-#: PRODUCTION short-cell rule (owner 2026-10-31): widen inside the window until MIN_INJECTIONS, else the all-cell pool;
-#: SCATTER is never NaN and the acceptance never drops a read (FIX_SPEC sec 12 item 2)
+#: PRODUCTION short-cell rule (owner 2026-10-31, completed after M8): widen inside the window up to the whole map, then
+#: the window class over the map at FALLBACK_MIN, then the map's scatter x R_class (never the plain all-cell pool for a
+#: windowed cell); SCATTER is never NaN and the acceptance never drops a read (FIX_SPEC sec 12 item 2; M1: 0.4-2.2 % of
+#: cells cannot reach MIN_INJECTIONS in some plane with any class pooling)
 PRODUCTION_SHORT_CELL_RULE = "widen"
 #: PRODUCTION curve (owner 2026-10-31): two curves per coverage-edge cell by |ln r| <= / > 0.03, each source read on
-#: its own r (M3: recovery depends on |ln r| in edge cells, -0.10 at the transition); other cells one curve
+#: its own r (M3, Taurus/Aquila edge cells: logistic slope on |ln r| -2.2 to -2.3, z > 25; middle vs outer |ln r|
+#: quartiles +0.10 in recovered fraction at the 0.5 point, +0.06-0.12 near 0.9); other cells one curve
 PRODUCTION_CURVE_CLASS = "gradient"
 SHORT_RULES = ("nan", "widen")
 CURVE_CLASSES = ("cell", "gradient")
@@ -923,8 +993,7 @@ class PoolingRule:
     where the rule has an edge class, else the whole map)), `gradient_class`
     (the errors' injections split by |ln r| <= / > `gradient_boundary`: two SCATTER/BIAS per cell), `curve_class`
     ("cell", main's; "gradient": two curves per coverage-edge cell by |ln r|). The three named parameters of the
-    brief map onto these fields through `named` (contract change: gradient_class, gradient_boundary, curve_class and
-    `named` are additions)."""
+    brief map onto these fields through `named`."""
     radius_arcsec: float
     widenings: Tuple[int, ...]
     min_injections: int
@@ -1000,11 +1069,17 @@ def pool_matrices(cells: CellGrid, ids: np.ndarray, classes: np.ndarray, rule: P
     """Sparse (n, n) 0/1 pooling matrices, one per widening of `rule` (or `widenings`): (i, j) = 1 where cell centres
     (CellGrid.centres_arcsec) lie within radius x widening, the classes match and (rule.noise_window) sigma[j] /
     sigma[i] lies within the window; a cell pools with itself. Identity (legacy rule): `pacs_completeness.pool_matrices`.
-    Contract change: `widenings` and `sigma` (the window needs the cells' CELL_SIGMA) are added keywords."""
-    centres = cells.centres_arcsec(np.asarray(ids, np.int64))
+    `widenings` and `sigma` (the window needs the cells' CELL_SIGMA) are keywords."""
+    return centre_matrices(cells.centres_arcsec(np.asarray(ids, np.int64)), rule, widenings, classes, sigma)
+
+
+def centre_matrices(centres: np.ndarray, rule: PoolingRule, widenings: Optional[Sequence[int]] = None,
+                    classes: Optional[np.ndarray] = None, sigma: Optional[np.ndarray] = None) -> list:
+    """`pool_matrices` on cell centres given in arcsec ((n, 2); the completeness product's `centres`, several maps far
+    apart). Without classes every cell is one class."""
     n = len(centres)
     tree = cKDTree(centres)
-    classes = np.asarray(classes)
+    classes = np.zeros(n, np.int8) if classes is None else np.asarray(classes)
     sig = None if sigma is None else np.asarray(sigma, float)
     out = []
     for k in (rule.widenings if widenings is None else widenings):
@@ -1260,6 +1335,28 @@ def _fallback_values(fb: np.ndarray, set_index: int, g: Optional[int], edge_out:
     return med, sc
 
 
+def _class_scaled_fallback(fbv: Tuple[np.ndarray, np.ndarray], W_map, rec: dict, sig: np.ndarray, mad_all: float
+                           ) -> Tuple[np.ndarray, np.ndarray]:
+    """Step 3 of the completed fallback (FALLBACK_MIN): for the rows of `W_map` (the window class over the whole map),
+    the map's scatter per plane times R_class = 1.4826 MAD(z of the class's far records, all planes) / `mad_all`; the
+    median (the bias) stays the map's. Rows without a class (W_map row empty) keep `fbv`."""
+    med, sc = fbv
+    sc = sc.copy()
+    far = ~rec["near"].astype(bool)
+    row = rec["row"].astype(np.int64)[far]
+    z = rec["dflux"].astype(np.float64)[far] / sig[row]
+    order = np.argsort(row, kind="stable")
+    row_s, z_s = row[order], z[order]
+    starts = np.searchsorted(row_s, np.arange(len(sig) + 1))
+    for i in np.flatnonzero(np.diff(W_map.indptr) > 0):
+        cols = W_map.indices[W_map.indptr[i]:W_map.indptr[i + 1]]
+        v = np.concatenate([z_s[starts[c]:starts[c + 1]] for c in cols])
+        r = _mad(v) / mad_all if mad_all > 0 else np.nan
+        if np.isfinite(r):
+            sc[i] = sc[i] * r
+    return med, sc
+
+
 def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int, int, int], rule: PoolingRule,
                flux_grid_mjy: np.ndarray) -> dict:
     """One square pooling block of POOL_BLOCK_CELLS cells (cell lines i0:i1, columns j0:j1): its rows' curve, flux90,
@@ -1322,10 +1419,15 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
 
     ladder = [remap(W, pos_ext) for W in Ws]
     level_min = [rule.min_injections] * len(Ws)
+    W_map = None                       # the window class over the whole map, for the rows the ladder left short
     if extra:
         pos_all = np.searchsorted(loaded, np.arange(n_all))
         ladder += [remap(W, pos_all) for W in extra]
         level_min += [rule.min_injections] * len(extra)
+        if rule.noise_window is not None and hist.get("to_map_fallback_rows", 0):
+            W_map = ladder[-1]
+            ladder.append(W_map)                     # step 2: the window class over the map at FALLBACK_MIN
+            level_min.append(FALLBACK_MIN)
     bm = rec["half"] == 0
     build = {k: rec[k][bm] for k in ("row", "plane", "recovered", "near", "dflux", "lnr")}
     # the curve: main's pooling (in S/N, no window, no class); under curve_class "gradient" a coverage-edge cell's two
@@ -1365,6 +1467,8 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
         for g in gsets:
             rr = r if g is None else {k: v[_gradient_class(r["lnr"], rule.gradient_boundary) == g] for k, v in r.items()}
             fbv = None if fb is None else _fallback_values(fb, set_index, g, edge_out, out_rows.size, rule.min_injections)
+            if fbv is not None and W_map is not None and "fallback_all" in tab.data:
+                fbv = _class_scaled_fallback(fbv, W_map, rr, sig, float(np.asarray(tab.data["fallback_all"])[set_index, 2 if g is None else g]))
             e.append(_cell_errors(ladder, flux_grid_mjy, sig, rr, rule, sig_out, fbv, level_min))
         return e[0] if len(e) == 1 else {k: np.stack([q[k] for q in e]) for k in ("scatter", "bias")}
 
@@ -1418,14 +1522,17 @@ class BandCompleteness:
     bias: np.ndarray
     held: dict
     stats: dict
+    eps_flux: Optional[dict] = None
 
 
 def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, stats: dict,
-                  flux_grid_mjy: np.ndarray) -> BandCompleteness:
+                  flux_grid_mjy: np.ndarray, rule: Optional[PoolingRule] = None,
+                  records_dir: Optional[str] = None) -> BandCompleteness:
     """The band from its pooling blocks (`_assemble_tile` + `_band_dict`): rows in cell-id order (FROZEN 4); every row
     filled exactly once. `held`, `stats`: `held_and_stats`. `held` gains build_errors (C2), and the held-out half's own
     curve and pooled totals built exactly as the stored curve (`curve`, `curve_total`: C1, per class under a gradient
-    curve)."""
+    curve). With `rule` (non-legacy) and `records_dir`: the flux-proportional term `fit_flux_term` on the build half, as
+    `eps_flux` (also held["eps_flux"]); None otherwise (the legacy rule: not applied)."""
     n_row = np.asarray(detection.cells.ids).size
     n_plane = flux_grid_mjy.size
     if not pooled:
@@ -1468,7 +1575,163 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
                  nan_cellplanes=int((~np.isfinite(errs["scatter"])).sum()),
                  nan_build_cellplanes=int((~np.isfinite(build_errs["scatter"])).sum()))
     held["stats"] = [stats]
-    return BandCompleteness(detection, curve, f90, n_pos, errs["scatter"], errs["bias"], held, stats)
+    eps = None
+    if rule is not None and records_dir is not None and not rule.is_legacy:
+        eps = fit_flux_term(detection, records_dir, build_errs["scatter"], flux_grid_mjy, rule)
+        held["eps_flux"] = eps
+    return BandCompleteness(detection, curve, f90, n_pos, errs["scatter"], errs["bias"], held, stats, eps)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# the flux-proportional error term
+
+def noise_classes(sigma: np.ndarray, cell_map: Optional[np.ndarray] = None) -> np.ndarray:
+    """Per row 0 (quiet) or 1 (noisy): CELL_SIGMA > FLUX_TERM_NOISY_FACTOR x the median CELL_SIGMA of the row's map
+    (`cell_map`; one map when None), the classes C2 reads."""
+    sigma = np.asarray(sigma, np.float64)
+    cm = np.zeros(sigma.size, np.int64) if cell_map is None else np.asarray(cell_map, np.int64)
+    med = np.full(sigma.size, np.nan)
+    for m in np.unique(cm):
+        sel = cm == m
+        med[sel] = np.median(sigma[sel])
+    return (sigma > FLUX_TERM_NOISY_FACTOR * med).astype(np.int8)
+
+
+def _read_at_flux(values: np.ndarray, flux_grid_mjy: np.ndarray, row: np.ndarray, flux: np.ndarray) -> np.ndarray:
+    """values (n_row, n_flux) on the flux grid (bright to faint) read at each (row, flux), linear in log flux between the
+    bracketing planes, held at the grid's ends (`pacs_completeness._at_injected_flux`, the reading C2 uses)."""
+    lf = np.log10(np.asarray(flux_grid_mjy, float)[::-1])
+    t = np.interp(np.log10(np.asarray(flux, float)), lf, np.arange(lf.size, dtype=float))
+    k0 = np.minimum(np.floor(t).astype(np.int64), lf.size - 2)
+    w = t - k0
+    v = np.asarray(values, np.float64)[:, ::-1]
+    return v[row, k0] * (1.0 - w) + v[row, k0 + 1] * w
+
+
+def _robust_var(v: np.ndarray) -> float:
+    s = MAD_TO_SIGMA * np.median(np.abs(v - np.median(v)))
+    return float(s * s)
+
+
+def _eps_fit(z: np.ndarray, x: np.ndarray, plane: np.ndarray, weight: Optional[np.ndarray] = None) -> Tuple[float, int]:
+    """eps from residuals z = dflux / S and x = (F / S)^2: per S/N plane with >= FLUX_TERM_MIN_RESIDUALS residuals,
+    y = robust var(z) - 1 = eps^2 <x>; weighted non-negative least squares over the planes (weight n / (2 var(z)^2), the
+    inverse variance of a variance estimate); (eps, planes used). `weight`: per-residual integer multiplicity (bootstrap)."""
+    num = den = 0.0
+    used = 0
+    for p in np.unique(plane):
+        sel = plane == p
+        zz, xx = z[sel], x[sel]
+        if weight is not None:
+            zz, xx = np.repeat(zz, weight[sel]), np.repeat(xx, weight[sel])
+        n = zz.size
+        if n < FLUX_TERM_MIN_RESIDUALS:
+            continue
+        v = _robust_var(zz)
+        if not np.isfinite(v) or v <= 0:
+            continue
+        w = n / (2.0 * v * v)
+        xm = float(np.mean(xx))
+        num += w * xm * (v - 1.0)
+        den += w * xm * xm
+        used += 1
+    if used == 0 or den <= 0:
+        return 0.0, used
+    return float(np.sqrt(max(num / den, 0.0))), used
+
+
+def fit_flux_term(detection: BandDetection, records_dir: str, build_scatter: np.ndarray, flux_grid_mjy: np.ndarray,
+                  rule: PoolingRule, cell_map: Optional[np.ndarray] = None) -> Optional[dict]:
+    """The flux-proportional error term per noise class (FIX_SPEC sec 12; brief R2 C2): over the BUILD half's far
+    residuals inside the flux grid, the excess of their variance over the pooled SCATTER of the build half,
+    var(dflux) - (CELL_SIGMA x SCATTER)^2 = (eps x F)^2, fitted in units of the read SCATTER (z = dflux / S,
+    var(z) - 1 = eps^2 (F / S)^2) per S/N plane, weighted NNLS over planes with >= FLUX_TERM_MIN_RESIDUALS residuals,
+    eps >= 0. The constant term is the per-plane SCATTER's; only eps is fitted. `build_scatter`: held["build_errors"]
+    ["scatter"] (mJy; a leading class axis under a gradient pooling class, each injection reading its own |ln r| class).
+    None under the legacy rule (eps not applied). Returns {class: eps, class + "_lo"/"_hi": 16/84 % bootstrap over cells,
+    class + "_n": residuals, class + "_planes": planes used}."""
+    if rule.is_legacy:
+        return None
+    ids = np.asarray(detection.cells.ids, np.int64)
+    sigma = np.asarray(detection.cells.sigma, np.float64)
+    tab = _open_table(records_dir, ids.size, _f32(detection.cells.sigma))
+    rec, rec_row = tab.rows(("plane", "half", "near", "dflux", "lnr"), np.arange(ids.size))
+    # the injected flux: plane S/N x the CELL_SIGMA of the cell the injection landed in (the table keeps no flux column)
+    flux = snr_grid()[rec["plane"].astype(np.int64)] * sigma[rec_row]
+    fg = np.asarray(flux_grid_mjy, float)
+    sel = (rec["half"] == 0) & ~rec["near"].astype(bool) & (flux >= fg.min()) & (flux <= fg.max())
+    row = rec_row[sel].astype(np.int64)
+    plane, flux, dflux = rec["plane"][sel].astype(np.int64), flux[sel], rec["dflux"][sel].astype(np.float64)
+    sb = np.asarray(build_scatter)
+    if sb.ndim == 3:
+        g = _gradient_class(rec["lnr"][sel], rule.gradient_boundary)
+        s = np.where(g == 1, _read_at_flux(sb[1], fg, row, flux), _read_at_flux(sb[0], fg, row, flux))
+    else:
+        s = _read_at_flux(sb, fg, row, flux)
+    good = np.isfinite(s) & (s > 0)
+    cls = noise_classes(sigma, cell_map)[row]
+    rng = np.random.default_rng(FLUX_TERM_SEED)
+    out = {}
+    for c, name in enumerate(FLUX_TERM_CLASSES):
+        m = good & (cls == c)
+        z, x, pl, rr = dflux[m] / s[m], (flux[m] / s[m]) ** 2, plane[m], row[m]
+        eps, used = _eps_fit(z, x, pl)
+        boot = []
+        if used:
+            for _ in range(FLUX_TERM_BOOTSTRAP):
+                k = rng.poisson(1.0, ids.size)
+                boot.append(_eps_fit(z, x, pl, k[rr])[0])
+        lo, hi = (np.percentile(boot, [16, 84]) if boot else (np.nan, np.nan))
+        out.update({name: eps, name + "_lo": float(lo), name + "_hi": float(hi), name + "_n": int(m.sum()),
+                    name + "_planes": int(used)})
+    return out
+
+
+def eps_rows(eps_flux: Optional[dict], sigma: np.ndarray, cell_map: Optional[np.ndarray] = None) -> np.ndarray:
+    """Per row, its noise class's EPS_FLUX (zeros when `eps_flux` is None: the legacy rule)."""
+    sigma = np.asarray(sigma, np.float64)
+    if eps_flux is None:
+        return np.zeros(sigma.size)
+    return np.array([eps_flux[n] for n in FLUX_TERM_CLASSES], np.float64)[noise_classes(sigma, cell_map)]
+
+
+def flux_sigma(scatter_mjy: np.ndarray, eps: np.ndarray, flux: np.ndarray) -> np.ndarray:
+    """SIGMA at every read (detections and ORIGIN-3 bounds): sqrt((CELL_SIGMA x SCATTER)^2 + (eps x F)^2), the SCATTER
+    read at F in mJy (`calibrated_sigma`'s value), `eps` the row's class value (`eps_rows`), F the source's flux in mJy.
+    With eps = 0 the SCATTER itself, unchanged."""
+    s = np.asarray(scatter_mjy, np.float64)
+    e = np.asarray(eps, np.float64) * np.asarray(flux, np.float64)
+    return np.where(e == 0.0, s, np.sqrt(s * s + e * e))
+
+
+def source_ln_r(m: Mosaic, detection: BandDetection, ra: np.ndarray, dec: np.ndarray) -> np.ndarray:
+    """Per SESNA source, ln r = ln(mean coverage of the aperture box at its position / its cell's mean coverage), the
+    quantity the records' `lnr` holds for an injection (M3's r; box of half-side ceil(annulus outer radius) + 1 px at the
+    nearest pixel, the cell's mean over all its pixels), at the registered position (FROZEN 9); NaN for a source outside
+    the band's cells. Under the gradient curve a source with |ln r| > GRADIENT_BOUNDARY reads the second curve."""
+    out = np.full(np.asarray(ra).size, np.nan, np.float32)
+    rows = np.asarray(detection.src_row, np.int64)
+    sel = np.flatnonzero(rows >= 0)
+    if not sel.size:
+        return out
+    x, y = m.xy(*grid.to_map_frame(np.asarray(ra, float)[sel], np.asarray(dec, float)[sel], detection.shift[:2]))
+    ix, iy = np.rint(x).astype(np.int64), np.rint(y).astype(np.int64)
+    rb = int(np.ceil(m.ann_out_px)) + 1
+    ny, nx = _shape_of(m)
+    cov_layer = m.layers["coverage"]
+    box = np.full(sel.size, np.nan)
+    key = np.clip(iy, 0, ny - 1) // TILE * (nx // TILE + 1) + np.clip(ix, 0, nx - 1) // TILE
+    for k in np.unique(key):
+        j = np.flatnonzero(key == k)
+        ty, tx = int(np.clip(iy[j[0]], 0, ny - 1) // TILE), int(np.clip(ix[j[0]], 0, nx - 1) // TILE)
+        y0, x0 = ty * TILE - rb, tx * TILE - rb
+        cov = cov_layer.window(y0, (ty + 1) * TILE + rb, x0, (tx + 1) * TILE + rb)
+        box[j] = _box_mean(cov, y0, x0, ix[j], iy[j], rb, (ny, nx))
+    cells = np.asarray(detection.cells.ids, np.int64)[rows[sel]]
+    mean = _cell_coverage(cov_layer, m.cells, cells)[0]
+    with np.errstate(all="ignore"):
+        out[sel] = np.log(box / mean).astype(np.float32)
+    return out
 
 
 def empty_band(n_src: int, n_flux: int) -> BandCompleteness:
@@ -1484,212 +1747,3 @@ def empty_band(n_src: int, n_flux: int) -> BandCompleteness:
     nan = np.zeros((0, n_flux), np.float32)
     return BandCompleteness(det, np.zeros((0, n_flux), np.uint16), z(np.float32), z(np.int32), nan, nan.copy(), None,
                             dict(stats=[]))
-
-
-# ----------------------------------------------------------------------------------------------------------------------
-# ROUND-2 ADAPTER to the old modules (R3: swap -- delete this section once mosaic.py and detect.py are filled)
-
-class _OldMosaic:
-    """The contract's Mosaic surface the injection uses, on the old prepared `pacs_fit.Tile` of a mosaic record:
-    window, template_patches, aperture (with a Window), pixel_sigma, beam_px_at, injection_half_width, pixel_arcsec,
-    band, grid.shape, layers["coverage"], key. Picklable by (config, record). R3: swap."""
-
-    def __init__(self, config, record):
-        self.config = config
-        self.record = record
-        self.key = record.path
-        self._tile = None
-
-    def __getstate__(self):
-        return dict(config=self.config, record=self.record, key=self.key, _tile=None)
-
-    @property
-    def tile(self):
-        if self._tile is None:
-            from sesnaimpute.sky.derived import pacs_fit           # R3: swap
-            self._tile = pacs_fit.cached_tile(self.config, self.record)
-        return self._tile
-
-    @property
-    def shape(self):
-        return tuple(self.record.shape)
-
-    @property
-    def band(self):
-        return self.record.band
-
-    @property
-    def pixel_arcsec(self):
-        return self.tile.pixel_arcsec
-
-    @property
-    def layers(self):
-        return {"coverage": _DenseLayer(os.path.join(self.record.mosaic_dir, "coverage.npy"), 0.0)}
-
-    def injection_half_width(self):
-        return self.tile.injection_half_width()
-
-    def beam_px_at(self, x, y):
-        return self.tile.beam_px_at(x, y)
-
-    def pixel_sigma(self, x, y):
-        return self.tile.pixel_sigma(x, y)
-
-    def window(self, y0, y1, x0, x1):
-        t = self.tile
-        return Window(y0, x0, np.array(t.image[y0:y1, x0:x1]), t.error[y0:y1, x0:x1])
-
-    def template_patches(self, x, y, flux):
-        parts = list(self.tile._template_patches(x, y, flux))
-        if not parts:
-            h = self.tile.injection_half_width()
-            return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros((0, 2 * h + 1, 2 * h + 1))
-        return tuple(np.concatenate([p[i] for p in parts]) for i in range(3))
-
-    def aperture(self, x, y, window=None, chunk=2048):
-        """`pacs_fit.Tile.aperture` on a Window (rows and columns offset; the old code offset rows only)."""
-        from sesnaimpute.sky.derived import pacs_fit                # R3: swap
-        from sesnaimpute.sky.derived.pacs_psf import MosaicPSF
-        t = self.tile
-        if window is None:
-            image, error, r0, c0 = t.image, t.error, 0, 0
-        else:
-            image, error, r0, c0 = window.image, window.error, window.y0, window.x0
-        r_ap, r_in, r_out = (r / t.pixel_arcsec for r in APERTURES[t.record.band])
-        x = np.asarray(x, float).ravel()
-        y = np.asarray(y, float).ravel()
-        n = x.size
-        rb = int(np.ceil(r_out)) + 1
-        flux, sky, sd, area = (np.full(n, np.nan) for _ in range(4))
-        cov = np.zeros(n, bool)
-        sd_eef = np.full(n, t.enclosed_fraction)
-        for lo in range(0, n, chunk):
-            sl = slice(lo, lo + chunk)
-            xs, ys = x[sl], y[sl]
-            f, s_, d_, a_, c_ = pacs_fit._aperture_core(image, error, xs - c0, ys - r0, r_ap, r_in, r_out, 5)
-            mix = t._psf.weights(xs, ys) if isinstance(t._psf, MosaicPSF) else None
-            eef, fraction = t._corrections_at(xs, ys, mix)
-            amp = np.where(c_, f / fraction, 0.0)
-            if not c_.any():
-                cov[sl] = c_
-                continue
-            model = t._outer_light(xs, ys, rb, mix)
-            for _ in range(2):
-                f, s_, d_, a_, c_ = pacs_fit._aperture_core_wing(image, error, xs - c0, ys - r0, r_ap, r_in, r_out, 5,
-                                                                 model, np.where(c_ & np.isfinite(amp), amp, 0.0))
-                amp = np.where(c_, f / eef, 0.0)
-            flux[sl], sky[sl], sd[sl], area[sl], cov[sl] = f / eef, s_, d_, a_, c_
-            sd_eef[sl] = eef
-        return mosaic.ApertureFit(flux, sky, sd * np.sqrt(area) / sd_eef, cov)
-
-    def operations(self) -> "_Operations":
-        ops = _Operations.__new__(_Operations)
-        ops.m = self
-        ops.window = self.window
-        ops.template_patches = self.template_patches
-        ops.aperture = lambda x, y, win: self.aperture(x, y, window=win)
-        ops.coverage = self.layers["coverage"]
-        ops.paste = _old_paste
-        ops.peaks = lambda inj, x, y, r, flux, win: _old_window_peaks(self, inj, x, y, r, flux, win)
-        return ops
-
-
-class _DenseLayer:
-    """A dense .npy layer read through the TiledLayer `window` surface (fill outside the grid). R3: swap."""
-
-    def __init__(self, path, fill):
-        self.a = np.load(path, mmap_mode="r")
-        self.fill = fill
-
-    def window(self, y0, y1, x0, x1):
-        ny, nx = self.a.shape
-        out = np.full((y1 - y0, x1 - x0), self.fill, self.a.dtype)
-        a0, a1, b0, b1 = max(y0, 0), min(y1, ny), max(x0, 0), min(x1, nx)
-        if a1 > a0 and b1 > b0:
-            out[a0 - y0:a1 - y0, b0 - x0:b1 - x0] = self.a[a0:a1, b0:b1]
-        return out
-
-
-def _old_paste(window: Window, cx, cy, patches) -> None:
-    """`pacs_fit._paste` of each patch, in order, into the window (grid coordinates). R3: swap -> mosaic.paste."""
-    ny, nx = window.image.shape
-    for i in range(len(cx)):
-        p = patches[i]
-        x0, y0 = int(cx[i]) - window.x0, int(cy[i]) - window.y0
-        side_y, side_x = p.shape
-        a0, b0 = max(x0, 0), max(y0, 0)
-        a1, b1 = min(x0 + side_x, nx), min(y0 + side_y, ny)
-        if a1 <= a0 or b1 <= b0:
-            continue
-        window.image[b0:b1, a0:a1] += p[b0 - y0:b1 - y0, a0 - x0:a1 - x0].astype(np.float32)
-
-
-def _old_window_peaks(om: _OldMosaic, inj: Injector, x, y, radius_px, flux, window: Window):
-    """`pacs_completeness.window_peaks` with the found peak's flux measured on a Window (`_OldMosaic.aperture`). R3:
-    swap -> detect.window_peaks."""
-    from sesnaimpute.sky.derived import pacs_completeness as pc   # R3: swap
-    from sesnaimpute.sky.derived import pacs_fit
-    tile = om.tile
-    x = np.asarray(x, float)
-    y = np.asarray(y, float)
-    n = x.size
-    out = (np.zeros(n, bool), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan))
-    if n == 0:
-        return out
-    ms = pc.matched_state(tile)
-    rad = np.broadcast_to(np.asarray(radius_px, float), (n,))[:, None, None]
-    h = int(np.ceil(rad.max())) + 2
-    off = np.arange(-h, h + 1)
-    cx, cy = np.rint(x).astype(np.int64), np.rint(y).astype(np.int64)
-    px = np.ascontiguousarray(np.broadcast_to(cx[:, None, None] + off[None, None, :], (n, off.size, off.size)))
-    py = np.ascontiguousarray(np.broadcast_to(cy[:, None, None] + off[None, :, None], (n, off.size, off.size)))
-    dist = np.hypot(px - x[:, None, None], py - y[:, None, None])
-    ny, nx = tile.shape
-    use = (dist <= rad + 1.5) & (px >= 0) & (px < nx) & (py >= 0) & (py < ny)
-    v = np.full(px.shape, np.nan)
-    v[use] = ms["m"][py[use], px[use]]
-    if flux is not None:
-        v = v + pc._injected_delta(tile, x, y, np.broadcast_to(np.asarray(flux, float), x.shape), px, py)
-    cid = tile.grid.cell_ids(px, py)
-    good = cid >= 0
-    v = np.where(good, v - inj.m_offset_cell[np.maximum(cid, 0)], np.nan)
-    thr = np.where(good, pacs_fit.DETECTION_SNR * inj.m_sigma_cell[np.maximum(cid, 0)], np.nan)
-    pk = pc._local_peaks(v, thr) & (dist <= rad)
-    found, xc, yc, fnu, dd = out
-    cand = np.where(pk, dist, np.inf).reshape(n, -1)
-    best = np.argmin(cand, axis=1)
-    has = np.isfinite(cand[np.arange(n), best])
-    for i in np.flatnonzero(has):
-        iy, ix = divmod(int(best[i]), off.size)
-        dy, dx = pc._parabola(v[i], iy, ix)
-        xc[i], yc[i] = px[i, iy, ix] + dx, py[i, iy, ix] + dy
-    if has.any():
-        cidh = tile.grid.cell_ids(xc[has], yc[has])
-        offh = np.where(cidh >= 0, inj.offset_cell[np.maximum(cidh, 0)], np.nan)
-        a = om.aperture(xc[has], yc[has], window=window)
-        fnu[has] = np.where(a.covered, a.flux - offh, np.nan)
-        dd[has] = np.hypot(xc[has] - x[has], yc[has] - y[has])
-        found[has] = dd[has] <= rad[has, 0, 0]
-    return found, xc, yc, fnu, dd
-
-
-def _old_band_detection(state: dict) -> BandDetection:
-    """A BandDetection from the old DETECT state (`pacs_stages.detect`'s detect.pkl dict, one map). R3: swap."""
-    g = state["geometry"][0][2]
-    cg = CellGrid(g.wcs, tuple(g.shape), float(g.step_x), float(g.step_y), int(g.nx), int(g.ny))
-    cols = state["cols"]
-    ids = np.asarray(state["cell_id"], np.int64)
-    cells = CellStats(ids=ids, n_sigma=np.asarray(cols["n_sigma"]), sigma=np.asarray(state["cell_sigma"]),
-                      offset=np.asarray(state["cell_offset"]), sky=np.asarray(cols["sky"]), ra=np.asarray(cols["ra"]),
-                      dec=np.asarray(cols["dec"]), m_sigma=np.asarray(state["m_sigma_rows"]),
-                      m_offset=np.asarray(state["m_offset_rows"]), covered=np.ones(ids.size, bool))
-    p = state["peaks"]
-    peaks = Peaks(x=np.asarray(p["x"], float), y=np.asarray(p["y"], float), fnu=np.asarray(p["fnu"], float),
-                  cell=ids[np.asarray(p["row"], np.int64)] if ids.size else np.zeros(0, np.int64),
-                  row=np.asarray(p["row"], np.int64), snr=np.asarray(p["snr"], float), bin=np.asarray(p["bin"]),
-                  ra=np.asarray(p["ra"], float), dec=np.asarray(p["dec"], float), neg_count=np.zeros(0, np.int64))
-    sh = state["shifts"][0]
-    return BandDetection(cells=cells, cell_grid=cg, shift=(float(sh[0]), float(sh[1]), int(sh[2])),
-                         src_row=np.asarray(state["src_row"]), cell_bin=np.asarray(state["cell_bin"]), peaks=peaks,
-                         pos_k_arcsec=float(state["pos_k"]), r_match=float(state["r_match"][0]),
-                         kernel=Kernel(0, np.zeros((1, 1)), np.zeros((1, 1)), 0.0), n_src=int(state["n_src"]))

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import h5py
 import numpy as np
@@ -38,7 +38,6 @@ from astropy.wcs import WCS
 from sesnaimpute import build as build_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.config import product_path
-from sesnaimpute.definitions import COMPLETENESS_STORAGE_SCALE as STORAGE_SCALE
 from sesnaimpute.definitions import PACS_BANDS as BANDS
 from sesnaimpute.definitions import PACS_POOL_ARCSEC as POOL_ARCSEC
 from sesnaimpute.definitions import PACS_POOL_WIDENINGS as POOL_WIDENINGS
@@ -89,14 +88,6 @@ def photometry_path(config, region: str) -> str:
 # ----------------------------------------------------------------------------------------------------------------------
 # the completeness product
 
-def _snr_grid() -> np.ndarray:
-    try:
-        return inject.snr_grid()
-    except NotImplementedError:                                      # R3: swap
-        from sesnaimpute.sky.derived import pacs_completeness
-        return pacs_completeness.snr_grid()
-
-
 def _strings(values, n_rows: int = None) -> np.ndarray:
     """A byte-string array as the old writer made it (empty: one-byte strings)."""
     return np.array(list(values) or [""], dtype="S")[:len(values)]
@@ -105,8 +96,8 @@ def _strings(values, n_rows: int = None) -> np.ndarray:
 def _band_arrays(b: BandCompleteness) -> dict:
     """The arrays of one band's datasets, from the BandCompleteness (the old band dict's keys, `_band_dict`/`_empty_band`)."""
     det = b.detection
-    n_plane = b.curve.shape[1]
-    empty = det is None or det.cell_grid is None
+    n_plane = b.curve.shape[-1]
+    empty = det is None or det.cell_grid is None or det.cell_grid.wcs is None     # inject.empty_band: no grid
     if empty:
         z = lambda dt: np.zeros(0, dt)
         return dict(curve=np.zeros((0, n_plane), np.uint16), source_row=np.asarray(det.src_row, np.int32),
@@ -117,12 +108,21 @@ def _band_arrays(b: BandCompleteness) -> dict:
                     cell_offset=z(np.float32), cell_id=z(np.int64), cell_map_index=z(np.int32), cell_map=z("S1"),
                     map_id=z("S1"), map_obsid=z("S1"), map_shift=np.zeros((0, 2), np.float32), map_pairs=z(np.int32),
                     map_wcs=z("S1"), map_shape=np.zeros((0, 2), np.int32), map_cell_step=np.zeros((0, 2)))
-    n_row = b.curve.shape[0]
+    n_row = b.curve.shape[-2]
     cells, grid = det.cells, det.cell_grid
     map_id, map_obsid = str(b.stats["map_id"]), str(b.stats["map_obsid"])
-    envelope = b.curve.max(axis=0).astype(np.uint16) if n_row else np.zeros(n_plane, np.uint16)
-    return dict(curve=b.curve, source_row=np.asarray(det.src_row).astype(np.int32), envelope=envelope, n_pos=b.n_pos,
-                n_sigma=np.asarray(cells.n_sigma).astype(np.int16), flux90=b.flux90, bias=b.bias, scatter=b.scatter,
+    gradient = b.curve.ndim == 3                  # the gradient curve: class 0 (|ln r| <= boundary), class 1
+    curve, f90, n_pos = (b.curve[0], b.flux90[0], b.n_pos[0]) if gradient else (b.curve, b.flux90, b.n_pos)
+    envelope = b.curve.reshape(-1, n_plane).max(axis=0).astype(np.uint16) if n_row else np.zeros(n_plane, np.uint16)
+    extra = {}
+    if gradient:
+        extra.update(curve_gradient=b.curve[1], flux90_gradient=b.flux90[1], n_pos_gradient=b.n_pos[1])
+    if b.eps_flux is not None:
+        e = b.eps_flux
+        extra["eps_flux"] = np.array([[e[c], e[c + "_lo"], e[c + "_hi"], e[c + "_n"]] for c in inject.FLUX_TERM_CLASSES],
+                                     np.float64)
+    return dict(extra, curve=curve, source_row=np.asarray(det.src_row).astype(np.int32), envelope=envelope, n_pos=n_pos,
+                n_sigma=np.asarray(cells.n_sigma).astype(np.int16), flux90=f90, bias=b.bias, scatter=b.scatter,
                 sky_bin=np.asarray(det.cell_bin).astype(np.int8), cell_m_sigma=cells.m_sigma, cell_m_offset=cells.m_offset,
                 r_match=np.asarray([det.r_match], np.float32), rms_inj=float(b.stats.get("rms_inj", np.nan)),
                 rms_align=float(b.stats.get("rms_align", np.nan)), cell_ra=cells.ra, cell_dec=cells.dec,
@@ -135,12 +135,16 @@ def _band_arrays(b: BandCompleteness) -> dict:
                 map_cell_step=np.array([(grid.step_x, grid.step_y)], dtype=np.float64).reshape(1, 2))
 
 
-def write_completeness(path: str, region: str, mag: np.ndarray, bands: Dict[str, BandCompleteness]) -> None:
+def write_completeness(path: str, region: str, mag: np.ndarray, bands: Dict[str, BandCompleteness],
+                       source_ln_r: Optional[np.ndarray] = None) -> None:
     """Writes the completeness product. Identity: `pacs_completeness.write_product` (pacs_completeness.py:1758) --
-    every dataset and attribute byte-identical (FROZEN 1/4: CELL_ID and row order)."""
+    every dataset and attribute byte-identical (FROZEN 1/4: CELL_ID and row order) under the legacy estimator. Under
+    the gradient curve a band also gets CURVE_GRADIENT_<B>, FLUX90_GRADIENT_<B>_MJY, N_POS_GRADIENT_<B> (CURVE_<B>,
+    FLUX90, N_POS then hold class 0) and the region SOURCE_LN_R ((n_src, 3), `source_ln_r`); with the flux term
+    EPS_FLUX_<B> ((2 classes, value / 16 % / 84 % / n))."""
     stem = "completeness_pacs_source"
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    snr = _snr_grid()
+    snr = inject.snr_grid()
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "source"
         f.attrs["REGION"] = region
@@ -180,8 +184,16 @@ def write_completeness(path: str, region: str, mag: np.ndarray, bands: Dict[str,
             w("MAP_WCS_" + b, d["map_wcs"])
             w("MAP_SHAPE_" + b, d["map_shape"])
             w("MAP_CELL_STEP_" + b, d["map_cell_step"])
+            if "curve_gradient" in d:
+                w("CURVE_GRADIENT_" + b, d["curve_gradient"])
+                w("FLUX90_GRADIENT_%s_MJY" % b, d["flux90_gradient"])
+                w("N_POS_GRADIENT_" + b, d["n_pos_gradient"])
+            if "eps_flux" in d:
+                w("EPS_FLUX_" + b, d["eps_flux"]).attrs["CLASSES"] = np.array(inject.FLUX_TERM_CLASSES, dtype="S")
         w = lambda name, data: build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)])
         w("SOURCE_ROW", np.stack([np.asarray(bands[b].detection.src_row) for b in BANDS], axis=1).astype(np.int32))
+        if source_ln_r is not None:
+            w("SOURCE_LN_R", np.asarray(source_ln_r, np.float32))
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -325,7 +337,8 @@ def read_checks(path: str) -> List[CheckRow]:
 def read_completeness_band(path: str, band: str) -> dict:
     """One band's datasets of the completeness product (`pacs_completeness._read_band`): curve, mag, flux90, n_pos,
     scatter, bias, sigma (CELL_SIGMA), offset (CELL_OFFSET), sky_bin, cell_id, cell_map, map_id, map_wcs, map_shape,
-    map_shift, source_row, r_match (median over maps), flux (mJy of the plane), and `centres` (n, 2): each cell's centre in
+    map_shift, source_row, r_match (median over maps), flux (mJy of the plane), where written curve_gradient,
+    flux90_gradient and eps_flux ((2, 4): per noise class value, 16 %, 84 %, n), and `centres` (n, 2): each cell's centre in
     arcsec in the pooling frame (maps 1e7 arcsec apart), what the pooling matrices are built from. Pooling matrices
     themselves are built by the caller (they depend on the pooling rule)."""
     with h5py.File(path, "r") as f:
@@ -338,6 +351,10 @@ def read_completeness_band(path: str, band: str) -> dict:
                  map_shape=g("MAP_SHAPE_" + band), map_shift=g("MAP_SHIFT_%s_ARCSEC" % band),
                  source_row=g("SOURCE_ROW")[:, BANDS.index(band)])
         d["r_match"] = float(np.nanmedian(f["MAP_R_MATCH_%s_ARCSEC" % band][:]))
+        for key, name in (("curve_gradient", "CURVE_GRADIENT_" + band), ("flux90_gradient", "FLUX90_GRADIENT_%s_MJY" % band),
+                          ("eps_flux", "EPS_FLUX_" + band)):
+            if name in f:
+                d[key] = f[name][:]
         zero_point = float(f["CURVE_" + band].attrs["ZERO_POINT_JY"])
     d["flux"] = 1000.0 * zero_point * 10.0 ** (-d["mag"].astype(np.float64) / 2.5)
     xy = np.zeros((d["cell_id"].size, 2))

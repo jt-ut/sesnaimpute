@@ -4,19 +4,28 @@
            [--box RA DEC W H] [--out-root OTHER_ROOT]
     python -m sesnaimpute.sky.derived.pacs.convert --directory <dense mosaic dir> [--out-directory DIR] [--delete-dense]
 
-Reads `<root>/sky/derived/pacs/mosaic/<Region_safe>/<band>[__slice_...]/` (the folder of `pacs_mosaic.product_dir`); writes
-`image/ error/ coverage/ weight/` TiledLayer stores next to the dense files (or under --out-root / --out-directory), each
-with the WCS header of `mosaic.hdf5` WCS_HEADER; `image/index.json` "meta" = META (the old `lattice` keys renamed `smooth`)
-plus "layers": {name: {"units", "reading"}} from the layer datasets' attributes. A layer missing from the folder is skipped.
-hpx512 per tile is written by `TiledLayer.write_index`.
+Reads `<root>/sky/derived/pacs/mosaic/<Region_safe>/<band>[__slice_...]/` (the old dense mosaic folder); writes, next to
+the dense files (or under --out-root / --out-directory), the store `mosaic.Mosaic` opens (CONTRACT sec 5):
+  image/ error/ coverage/ weight/  TiledLayer stores, each with the WCS header of `mosaic.hdf5` WCS_HEADER; `image/
+                                   index.json` "meta" = META with each map's smoothed error renamed (`lattice` ->
+                                   `smooth` = "smooth/<map>", `lattice_step` -> `smooth_step`) plus "units" and
+                                   "reading" {layer: text} from the layer datasets' attributes (the layout build_mosaic
+                                   writes). A layer missing from the folder is skipped. hpx512 per tile by write_index.
+  smooth/<map>/                    each `_smooth/<map>.npy` as a TiledLayer (float64, fill NaN), as
+                                   psf.build_smoothed_error writes it
+  psf/                             `_psf/` (psf.json with the same renames; sub<k>.npy and table.npy copied, or
+                                   decompressed from .npy.zst)
+The reader floors and the bright-neighbour list are not in the old META: `mosaic.Mosaic` derives them on first open
+(stage mosaic stores them).
 
 Verification before any delete: each store is re-opened from disk and compared with the dense array over the WHOLE grid
 by bit pattern (NaN payloads and -0.0 included, so every covered pixel is equal); shape, dtype and the WCS header text must
-equal. `--delete-dense` removes the layer's .npy and .npy.zst files only after ALL present layers verified. `_smooth/`,
-`_psf/` and `mosaic.hdf5` are not touched. Idempotent: an existing store is verified and kept, not rewritten.
-Prints bytes before (dense file read) and after (tile files) per layer. Not run on TACC.
+equal; every smoothed-error sample and every PSF table bit-equal. `--delete-dense` removes the dense layers (.npy and
+.npy.zst), `_smooth/`, `_psf/` and `mosaic.hdf5` only after ALL of them verified. Idempotent: an existing store is
+verified and kept, not rewritten. Prints bytes before (dense file read) and after (tile files) per layer.
 
-Depends on: grid only. Replaces: the dense layer files of sky/derived/pacs_mosaic.py (round 3 switches the readers).
+Depends on: grid only. Replaces: the dense layout of the retired pacs_mosaic.py (stage mosaic converts a region's stored
+dense mosaic with this module before detect).
 """
 
 from __future__ import annotations
@@ -90,6 +99,81 @@ def _open_dense(directory: str, name: str, scratch: str):
     return np.load(path, mmap_mode="r"), os.path.getsize(files[0]), tmp
 
 
+def _smooth_name(old: str) -> str:
+    """The new smoothed-error folder of an old `lattice` path: "_smooth/<map>.npy" -> "smooth/<map>"."""
+    head, name = os.path.split(old)
+    assert head == "_smooth" and name.endswith(".npy"), "unexpected smoothed-error path %r" % old
+    return os.path.join("smooth", name[:-len(".npy")])
+
+
+def _same_bits(a: np.ndarray, b: np.ndarray) -> int:
+    """Elements whose bits differ (shape and dtype must agree, else all)."""
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return max(a.size, b.size, 1)
+    return int(np.count_nonzero(np.ascontiguousarray(a).view(np.uint8) != np.ascontiguousarray(b).view(np.uint8)))
+
+
+def _convert_smooth(directory: str, out_directory: str, log) -> int:
+    """`_smooth/<map>.npy` -> `smooth/<map>/` (TiledLayer float64, fill NaN), verified bit-equal. Returns the number of
+    differing samples."""
+    src = os.path.join(directory, "_smooth")
+    bad = 0
+    for name in sorted(os.listdir(src)) if os.path.isdir(src) else ():
+        if not name.endswith(".npy"):
+            continue
+        dense = np.load(os.path.join(src, name))
+        final = os.path.join(out_directory, _smooth_name(os.path.join("_smooth", name)))
+        if not os.path.exists(os.path.join(final, "index.json")):
+            part = final + ".converting"
+            if os.path.exists(part):
+                shutil.rmtree(part)
+            TiledLayer.from_dense(dense, part, fill=np.nan)
+            os.makedirs(os.path.dirname(final), exist_ok=True)
+            os.replace(part, final)
+        bad += _same_bits(TiledLayer.open(final, "r").to_dense(), dense)
+    if os.path.isdir(src):
+        log("smooth    %d smoothed-error stores, mismatching samples %d" % (len(os.listdir(src)), bad))
+    return bad
+
+
+def _convert_psf(directory: str, out_directory: str, scratch: str, log) -> int:
+    """`_psf/` -> `psf/`: psf.json with each map's `lattice` -> `smooth` ("smooth/<map>") and `lattice_step` ->
+    `smooth_step`; sub<k>.npy and table.npy copied (from the .npy, else the .npy.zst decompressed), verified bit-equal.
+    Returns the number of differing table elements."""
+    src = os.path.join(directory, "_psf")
+    if not os.path.exists(os.path.join(src, "psf.json")):
+        return 0
+    dst = os.path.join(out_directory, "psf")
+    with open(os.path.join(src, "psf.json")) as fh:
+        meta = _rename_keys(json.load(fh))
+    for q in meta["maps"]:
+        q["smooth"] = _smooth_name(q["smooth"])
+    names = ["sub%d" % k for k in range(meta["n_sub"])] + ["table"]
+    bad = 0
+    if not os.path.exists(os.path.join(dst, "psf.json")):
+        part = dst + ".converting"
+        if os.path.exists(part):
+            shutil.rmtree(part)
+        os.makedirs(part)
+        for n in names:
+            arr, _size, tmp = _open_dense(src, n, scratch)
+            np.save(os.path.join(part, n + ".npy"), np.asarray(arr))
+            del arr
+            if tmp:
+                os.remove(tmp)
+        with open(os.path.join(part, "psf.json"), "w") as fh:
+            json.dump(meta, fh)
+        os.replace(part, dst)
+    for n in names:
+        arr, _size, tmp = _open_dense(src, n, scratch)
+        bad += _same_bits(np.load(os.path.join(dst, n + ".npy")), np.asarray(arr))
+        del arr
+        if tmp:
+            os.remove(tmp)
+    log("psf       %d tables, mismatching elements %d" % (len(names), bad))
+    return bad
+
+
 def verify_layer(layer_dir: str, dense: np.ndarray, wcs_header: str) -> int:
     """Number of pixels (over the whole grid) whose bits differ between the stored tiles and `dense`; raises when shape,
     dtype or the WCS header differ. Reads the store fresh from disk, one tile row at a time."""
@@ -121,7 +205,10 @@ def convert_directory(directory: str, out_directory: Optional[str] = None, delet
     out_directory = out_directory or directory
     wcs_header, meta, units = _read_hdf5(directory)
     meta = _rename_keys(meta)
-    meta["layers"] = units
+    for q in meta.get("maps", ()):
+        q["smooth"] = _smooth_name(q["smooth"])
+    meta["units"] = {k: v["units"] for k, v in units.items()}
+    meta["reading"] = {k: v["reading"] for k, v in units.items()}
     scratch = os.path.join(out_directory, ".convert_tmp")
     result: Dict[str, dict] = {}
     for name in LAYERS:
@@ -149,14 +236,21 @@ def convert_directory(directory: str, out_directory: Optional[str] = None, delet
             os.remove(tmp)
         log("%-9s dense %12d B -> tiles %12d B  ratio %.3f  tiles %s  mismatching pixels %d  %.1f s"
             % (name, before, after, after / max(before, 1), result[name]["tiles"], bad, result[name]["seconds"]))
+    bad_smooth = _convert_smooth(directory, out_directory, log)
+    bad_psf = _convert_psf(directory, out_directory, scratch, log)
     shutil.rmtree(scratch, ignore_errors=True)
-    if any(r["bad"] for r in result.values()):
-        raise RuntimeError("conversion mismatch in %s: %s" % (directory, {k: v["bad"] for k, v in result.items()}))
+    if any(r["bad"] for r in result.values()) or bad_smooth or bad_psf:
+        raise RuntimeError("conversion mismatch in %s: %s; smooth %d, psf %d" % (
+            directory, {k: v["bad"] for k, v in result.items()}, bad_smooth, bad_psf))
     if delete_dense and result:
         for name in result:
             for p in _dense_files(directory, name):
                 os.remove(p)
-        log("deleted the dense files of %s" % ", ".join(result))
+        for d in ("_smooth", "_psf"):
+            if os.path.isdir(os.path.join(directory, d)):
+                shutil.rmtree(os.path.join(directory, d))
+        os.remove(os.path.join(directory, "mosaic.hdf5"))
+        log("deleted the dense layers (%s), _smooth/, _psf/ and mosaic.hdf5" % ", ".join(result))
     log("total dense %d B -> tiles %d B" % (sum(r["before"] for r in result.values()),
                                            sum(r["after"] for r in result.values())))
     return result
