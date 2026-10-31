@@ -68,6 +68,7 @@ from sesnaimpute.definitions import PACS_MAX_EXTRA_BATCHES as MAX_EXTRA_BATCHES
 from sesnaimpute.definitions import PACS_MIN_INJECTIONS as MIN_INJECTIONS
 from sesnaimpute.definitions import PACS_POOL_ARCSEC as POOL_ARCSEC
 from sesnaimpute.definitions import PACS_POOL_WIDENINGS as POOL_WIDENINGS
+from sesnaimpute.definitions import PACS_GRADIENT_LN_R
 from sesnaimpute.definitions import PACS_SNR_BIN_EDGES as SNR_BIN_EDGES
 from sesnaimpute.sky.derived.pacs import detect, grid, mosaic
 from sesnaimpute.sky.derived.pacs.detect import BandDetection, CellStats, Kernel, Peaks
@@ -106,7 +107,7 @@ REAL_CHECK_SEED = 99999
 #: the pooling parameters ruled by the science track (FIX_SPEC sec 8, 12; M1, M3)
 NOISE_WINDOW = 1.5
 EDGE_RATIO = 2.0
-GRADIENT_BOUNDARY = 0.03
+GRADIENT_BOUNDARY = PACS_GRADIENT_LN_R
 #: the all-cell pool is used with fewer than MIN_INJECTIONS far injections only when the whole map holds fewer (a
 #: median and a MAD need two values); never reached on the gate set (the legacy-free rules below never use it for a
 #: cell with a noise window)
@@ -119,8 +120,8 @@ MAP_MIN = 2
 #: thousands of residuals. Never the plain all-cell pool for a cell with a noise window.
 FALLBACK_MIN = 30
 #: owner 2026-10-31 (after M7): the injection rounds continue for a cell until the sampling error of its FLUX90 (from
-#: its pooled counts and the curve's local slope at the 0.9 crossing, `flux90_precision`) is at most this, relative. The
-#: big maps (slope ~1.5 per dex, ~130 pooled injections: 0.040) add no rounds; a map at slope 1.1 per dex needs ~160.
+#: its own pooled count and the slope of the widest (x3) pool's smooth curve at the 0.9 crossing, `flux90_precision`;
+#: owner's ruling 2026-10-31) is at most this, relative. Slope 1.1 per dex needs n >= 158 at the crossing.
 #: The MIN_INJECTIONS floor and the MAX_EXTRA_BATCHES cap are unchanged; the legacy rule keeps the floor alone.
 FLUX90_PRECISION = 0.05
 #: the S/N planes pooled (36)
@@ -569,8 +570,8 @@ def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[in
     pairs = injection_pairs()
     ids = np.asarray(detection.cells.ids, np.int64)
     blocks = injection_blocks(ids, detection.cell_grid.nx)
-    W = pool_matrices(detection.cell_grid, ids, np.zeros(ids.size, np.int8), PoolingRule.legacy(),
-                      widenings=POOL_WIDENINGS[:1])[0]
+    W, W_wide = pool_matrices(detection.cell_grid, ids, np.zeros(ids.size, np.int8), PoolingRule.legacy(),
+                              widenings=(POOL_WIDENINGS[0], POOL_WIDENINGS[-1]))
     count = np.zeros((ids.size, len(pairs)))
     recovered = np.zeros((ids.size, len(pairs)))
     tasks = []
@@ -591,7 +592,7 @@ def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[in
             break
         short = (W @ count) < MIN_INJECTIONS
         if precise:
-            short |= _imprecise(W @ count, W @ recovered)
+            short |= _imprecise(W @ count, W @ recovered, W_wide @ count, W_wide @ recovered)
         act = short.any(axis=0)
         if not act.any():
             continue
@@ -604,18 +605,25 @@ def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[in
     return tasks if r <= MAX_EXTRA_BATCHES else []
 
 
-def flux90_precision(n: np.ndarray, rec: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Per row and half, from pooled counts `n` and recovered `rec` (rows x pairs, pair = 2 plane + half): the relative
-    sampling error of FLUX90, ln(10) sqrt(p (1 - p) / n_x) / s, p = FLUX90_FRACTION, n_x the smaller pooled count of the
-    two planes bracketing the 0.9 crossing, s = dfrac/dlog10 F over the planes one below to one above them (the curve's
-    local slope; S/N planes are SNR_LOG_STEP dex apart, so log10 F steps alike at fixed CELL_SIGMA) -- M5/M7's arithmetic.
-    Returns (error (rows, 2), crossing plane k (rows, 2; -1 where the pooled curve does not cross 0.9 upward), n_x).
+def flux90_precision(n: np.ndarray, rec: np.ndarray, n_wide: Optional[np.ndarray] = None,
+                     rec_wide: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per row and half: the relative sampling error of FLUX90, sqrt(p (1 - p) / n_x) / s_ln, p = FLUX90_FRACTION,
+    s_ln = s / ln(10) the curve's slope per ln F, s = dfrac/dlog10 F (S/N planes are SNR_LOG_STEP dex apart, so log10 F
+    steps alike at fixed CELL_SIGMA). The crossing plane k and the slope s are read from the SMOOTH curve of the widest
+    pool (`n_wide`, `rec_wide`: the x3 widening's pooled counts and recovered; owner's ruling 2026-10-31: a cell's own
+    x1 pool gives a noisy slope), over the planes one below to one above the two bracketing the 0.9 crossing; n_x is the
+    smaller count of the CELL'S OWN pool (`n`) on those two planes. Without the wide pool the cell's own curve gives
+    both (M5/M7's arithmetic). Slope 1.1 per dex: n_x >= 158 for 0.05.
+    Returns (error (rows, 2), crossing plane k (rows, 2; -1 where the curve does not cross 0.9 upward), n_x).
     NaN error where there is no crossing or a flat slope."""
-    n = np.asarray(n, float).reshape(n.shape[0], N_PLANES, 2)
-    rec = np.asarray(rec, float).reshape(n.shape[0], N_PLANES, 2)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        frac = np.where(n > 0, rec / n, np.nan)
     rows = n.shape[0]
+    n = np.asarray(n, float).reshape(rows, N_PLANES, 2)
+    if n_wide is None:
+        n_wide, rec_wide = n, rec
+    nw = np.asarray(n_wide, float).reshape(rows, N_PLANES, 2)
+    rw = np.asarray(rec_wide, float).reshape(rows, N_PLANES, 2)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        frac = np.where(nw > 0, rw / nw, np.nan)
     err = np.full((rows, 2), np.nan)
     kk = np.full((rows, 2), -1, np.int64)
     nx = np.zeros((rows, 2))
@@ -631,17 +639,19 @@ def flux90_precision(n: np.ndarray, rec: np.ndarray) -> Tuple[np.ndarray, np.nda
     n_x = np.minimum(n[r, k0, h], n[r, k0 + 1, h])
     p = FLUX90_FRACTION
     with np.errstate(invalid="ignore", divide="ignore"):
-        e = np.log(10.0) * np.sqrt(p * (1 - p) / n_x) / slope
-    err[r, h] = np.where(slope > 0, e, np.nan)
+        e = np.sqrt(p * (1 - p) / n_x) / (slope / np.log(10.0))
+    err[r, h] = np.where((slope > 0) & (n_x > 0), e, np.nan)
     kk[r, h] = k0
     nx[r, h] = n_x
     return err, kk, nx
 
 
-def _imprecise(n: np.ndarray, rec: np.ndarray) -> np.ndarray:
+def _imprecise(n: np.ndarray, rec: np.ndarray, n_wide: Optional[np.ndarray] = None,
+               rec_wide: Optional[np.ndarray] = None) -> np.ndarray:
     """(rows x pairs) True on the planes k - 1 .. k + 2 around each (row, half)'s 0.9 crossing whose FLUX90 sampling error
-    exceeds FLUX90_PRECISION: where one more batch narrows FLUX90."""
-    err, k, _n = flux90_precision(n, rec)
+    (`flux90_precision`: the widest pool's slope, the cell's own count) exceeds FLUX90_PRECISION: where one more batch
+    narrows FLUX90."""
+    err, k, _n = flux90_precision(n, rec, n_wide, rec_wide)
     out = np.zeros((n.shape[0], N_PLANES, 2), bool)
     r, h = np.nonzero(np.isfinite(err) & (err > FLUX90_PRECISION))
     for d in (-1, 0, 1, 2):

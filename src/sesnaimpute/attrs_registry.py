@@ -4283,10 +4283,24 @@ REGISTRY[("sources_sesna_source", "ORIGIN_FNU")] = ("code",
     "covered -- no completeness value and no non-detection term (COMPLETENESS_2026-10-20.md rule 2, the same "
     "meaning Pokhrel et al. 2023, eHOPS I, ApJS 266, 32, gave the old catalogue column)." + _PACS_TAIL)
 # Unit 3: completeness_sesna_source grows to eleven bands (P70, P100, P160 copied from the PACS input)
+_PACS_SESNA_PER_ROW = ("CURVE_{b}", "COMPLETED_FROM_{b}", "CELL_ID_{b}", "CELL_MAP_INDEX_{b}", "CELL_MAP_{b}",
+                       "CELL_RA_{b}", "CELL_DEC_{b}", "CELL_SIGMA_{b}_MJY", "CELL_OFFSET_{b}_MJY", "N_POS_{b}",
+                       "N_SIGMA_POS_{b}")
+_PACS_GRADIENT_ROWS = (" In this file the cells near a coverage gradient (those whose curve for positions near the gradient "
+                       "differs from the curve of their other positions) appear twice: first among the cells, with the "
+                       "curve of the positions away from the gradient, and again after all the cells, with the curve of "
+                       "the positions near it (and that curve's count in N_POS_%s). A source points (SOURCE_ROW) to the "
+                       "second row when the coverage around it differs from its cell's mean coverage by more than 3 per "
+                       "cent (see the PACS completeness file's SOURCE_LN_R); every other column of the repeated row is "
+                       "the cell's own. The %s rows read through SOURCE_ROW are the curve each source's own position "
+                       "has; PIXEL_CURVE_%s uses the first rows only.")
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _tmpl in PACS_COPIED:
         _name = _tmpl.format(b=_band)
         REGISTRY[("completeness_sesna_source", _name)] = REGISTRY[("completeness_pacs_source", _name)]
+        if _tmpl in _PACS_SESNA_PER_ROW:
+            _u, _r = REGISTRY[("completeness_sesna_source", _name)]
+            REGISTRY[("completeness_sesna_source", _name)] = (_u, _r + _PACS_GRADIENT_ROWS % (_band, _band, _band))
     REGISTRY[("completeness_sesna_source", "PIXEL_CURVE_%s" % _band)] = (
         "dimensionless (completeness fraction, 0..1)",
         "For each admitted nside-512 pixel in HPX_PIX_512, the %s micron completeness curve at "
