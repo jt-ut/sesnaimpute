@@ -1531,7 +1531,7 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
             gb = _gradient_class(r["lnr"], rule.gradient_boundary)
             parts = [_pool_product(edge_W, {k: v[gb == g] for k, v in r.items()}, flux_grid_mjy, sig, n_loaded,
                                    sig_out) for g in (0, 1)]
-            for k in ("curve", "flux90", "n_pos", "pooled_total"):
+            for k in ("curve", "fraction", "flux90", "n_pos", "pooled_total"):
                 e = is_edge.reshape((-1,) + (1,) * (o[k].ndim - 1))
                 o[k] = np.stack([np.where(e, q[k], o[k]) for q in parts])
         return o
@@ -1543,10 +1543,30 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
     t_all = np.bincount(key, minlength=n_loaded * N_PLANES).reshape(n_loaded, N_PLANES).astype(np.float64)
     r_all = np.bincount(key, weights=build["recovered"].astype(np.float64),
                         minlength=n_loaded * N_PLANES).reshape(n_loaded, N_PLANES)
-    out["flux90_err"] = flux90_error(curve_Ws[0] @ t_all, None, curve_Ws[-1] @ t_all, curve_Ws[-1] @ r_all)[0][:, 0]
+    f90_err = flux90_error(curve_Ws[0] @ t_all, None, curve_Ws[-1] @ t_all, curve_Ws[-1] @ r_all)[0][:, 0]
+    if rule.curve_class == "gradient" and is_edge.any():
+        # an edge cell's CURVE is its class-0 edge pool: n from that pool's x1 count, slope and crossing from its widest
+        g0 = _gradient_class(build["lnr"], rule.gradient_boundary) == 0
+        t0 = np.bincount(key[g0], minlength=n_loaded * N_PLANES).reshape(n_loaded, N_PLANES).astype(np.float64)
+        r0 = np.bincount(key[g0], weights=build["recovered"][g0].astype(np.float64),
+                         minlength=n_loaded * N_PLANES).reshape(n_loaded, N_PLANES)
+        f90_err = np.where(is_edge, flux90_error(edge_W[0] @ t0, None, edge_W[-1] @ t0, edge_W[-1] @ r0)[0][:, 0], f90_err)
+    out["flux90_err"] = f90_err
     hm = ~bm
-    held_c = curve_of({k: rec[k][hm] for k in ("row", "plane", "recovered", "near", "dflux", "lnr")})
-    out["held_curve"], out["held_total"] = held_c["curve"], held_c["pooled_total"]
+    held_r = {k: rec[k][hm] for k in ("row", "plane", "recovered", "near", "dflux", "lnr")}
+    held_c = curve_of(held_r)
+    # C1 (R8): the held-out half's curve unrounded and its pooled totals, pooled exactly as CURVE; under the gradient
+    # curve also the S/N-plane counts of both halves on that pooling, for the C1 bar (`_bar_counts`)
+    out["held_curve"], out["held_total"] = held_c["fraction"].astype(np.float32), held_c["pooled_total"]
+    if rule.curve_class == "gradient":
+        both = [_bar_counts(curve_Ws, held_r, build, n_loaded)]
+        gh_, gb_ = (_gradient_class(r["lnr"], rule.gradient_boundary) for r in (held_r, build))
+        for g in (0, 1):
+            e = _bar_counts(edge_W, {k: v[gh_ == g] for k, v in held_r.items()},
+                            {k: v[gb_ == g] for k, v in build.items()}, n_loaded)
+            both.append(np.where(is_edge[None, :, None], e, both[0]))
+        out["held_bar_counts"] = np.stack(both[1:])           # (class, 4: held n, held got, build n, build got, rows, planes)
+        out["edge_cell"] = is_edge
     fb = np.asarray(tab.data["fallback"]) if (rule.short_rule == "widen" and "fallback" in tab.data) else None
     edge_out = (classes_all[out_rows] // 3) if rule.edge_class else None
 
@@ -1570,9 +1590,28 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
 def _pool_product(Ws, rec, flux_grid_mjy, sigma_rows, n_row, sigma_out):
     """The curve (encoded), FLUX90, the injections behind the faintest plane and the pooled totals (`pool_product`)."""
     fraction, count = curve_on_flux_grid(Ws, rec["row"], rec["plane"], rec["recovered"], sigma_out, flux_grid_mjy, n_row)
-    return dict(curve=np.rint(fraction * STORAGE_SCALE).astype(np.uint16),
+    return dict(curve=np.rint(fraction * STORAGE_SCALE).astype(np.uint16), fraction=fraction,
                 flux90=flux90(fraction, flux_grid_mjy).astype(np.float32), n_pos=count[:, -1].astype(np.int32),
                 pooled_total=count)
+
+
+def _bar_counts(Ws, held: dict, build: dict, n_row: int) -> np.ndarray:
+    """The C1 bar's counts (checks._flux90_halves_bar) on the pooling `Ws`: per output row and S/N plane the held half's
+    pooled injections and recovered, and the build half's, all on the widening the held half chooses (the narrowest
+    holding MIN_INJECTIONS held injections, else the widest). Returns (4, n_out, N_PLANES)."""
+    def counts(r):
+        key = r["row"].astype(np.int64) * N_PLANES + r["plane"].astype(np.int64)
+        t = np.bincount(key, minlength=n_row * N_PLANES).reshape(n_row, N_PLANES).astype(np.float64)
+        g = np.bincount(key, weights=r["recovered"].astype(np.float64),
+                        minlength=n_row * N_PLANES).reshape(n_row, N_PLANES)
+        return t, g
+    th, gh = counts(held)
+    tb, gb = counts(build)
+    out = np.stack([Ws[-1] @ m for m in (th, gh, tb, gb)])
+    for W in reversed(Ws[:-1]):
+        lv = np.stack([W @ m for m in (th, gh, tb, gb)])
+        out = np.where((lv[0] >= MIN_INJECTIONS)[None], lv, out)
+    return out
 
 
 def _cell_errors(Ws, flux_grid_mjy, sigma_rows, rec, rule, sigma_out, fallback=None, level_min=None):
@@ -1620,8 +1659,9 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
                   records_dir: Optional[str] = None) -> BandCompleteness:
     """The band from its pooling blocks (`_assemble_tile` + `_band_dict`): rows in cell-id order (FROZEN 4); every row
     filled exactly once. `held`, `stats`: `held_and_stats`. `held` gains build_errors (C2), and the held-out half's own
-    curve and pooled totals built exactly as the stored curve (`curve`, `curve_total`: C1, per class under a gradient
-    curve). With `rule` (non-legacy) and `records_dir`: the flux-proportional term `fit_flux_term` on the build half, as
+    curve (unrounded fraction) and pooled totals built exactly as the stored curve (`curve`, `curve_total`: C1, per
+    class under a gradient curve); under the gradient curve also `bar_counts` (class, 4, n_row, N_PLANES: `_bar_counts`
+    on the same pooling) and `edge_cell` (the rows whose curve is the edge pool), what checks.completeness_c1 reads. With `rule` (non-legacy) and `records_dir`: the flux-proportional term `fit_flux_term` on the build half, as
     `eps_flux` (also held["eps_flux"]); None otherwise (the legacy rule: not applied)."""
     n_row = np.asarray(detection.cells.ids).size
     n_plane = flux_grid_mjy.size
@@ -1638,7 +1678,9 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
     f90 = arr(cl, (n_row,), np.float32, np.nan)
     n_pos = arr(cl, (n_row,), np.int32, 0)
     tot = arr(cl, (n_row, n_plane), np.float64, 0.0)
-    h_curve = arr(cl, (n_row, n_plane), np.uint16, 0)
+    h_curve = arr(cl, (n_row, n_plane), np.float32, 0.0)
+    bar_counts = (np.zeros((2, 4, n_row, N_PLANES)) if "held_bar_counts" in p0 else None)
+    edge_cell = np.zeros(n_row, bool)
     h_tot = arr(cl, (n_row, n_plane), np.float64, 0.0)
     errs = {k: arr(el, (n_row, n_plane), np.float32, np.nan) for k in ("scatter", "bias")}
     build_errs = {k: arr(el, (n_row, n_plane), np.float32, np.nan) for k in ("scatter", "bias")}
@@ -1651,6 +1693,8 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
         filled[r] = True
         curve[..., r, :], f90[..., r], n_pos[..., r], tot[..., r, :] = o["curve"], o["flux90"], o["n_pos"], o["pooled_total"]
         h_curve[..., r, :], h_tot[..., r, :] = o["held_curve"], o["held_total"]
+        if bar_counts is not None:
+            bar_counts[:, :, r, :], edge_cell[r] = o["held_bar_counts"], o["edge_cell"]
         if "flux90_err" in o:
             f90_err[r] = o["flux90_err"]
         for k in errs:
@@ -1662,6 +1706,8 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
     held = dict(held)
     held["build_errors"] = build_errs
     held["curve"], held["curve_total"] = h_curve, h_tot
+    if bar_counts is not None:
+        held["bar_counts"], held["edge_cell"] = bar_counts, edge_cell
     stats = dict(stats, min_pool=float(tot.min()) if tot.size else np.nan,
                  median_pool=float(np.median(tot)) if tot.size else np.nan,
                  short=float((tot < MIN_INJECTIONS).mean()) if tot.size else np.nan, widen=widen,

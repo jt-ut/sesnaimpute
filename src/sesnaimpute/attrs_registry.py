@@ -4003,7 +4003,8 @@ _PACS_GRADIENT_READINGS = {
         "Statistical error of FLUX90 from the number of injections pooled and the curve's slope; the fit reads CURVE, not "
         "FLUX90. It is the binomial error of the recovered fraction at 0.9 for the artificial sources pooled at the "
         "cell (the build half), divided by how steeply the cell's wider-area curve rises there. Not a number where the "
-        "curve never reaches 0.9."),
+        "curve never reaches 0.9. At a cell on the edge of the map's coverage both are taken from the artificial "
+        "sources CURVE_{b} itself is built from there (the edge cells' sources in the flat part of the coverage)."),
     "CELL_CLASS_{b}": ("class code (0, 1 or 2)",
         "The cell's class for the {w} micron flux errors: 0 quiet (neither noisy nor crowded); 1 noisy (CELL_SIGMA_{b}_MJY "
         "above 2 times the map's median, whether crowded or not); 2 crowded (not noisy, and more PACS detections of "
