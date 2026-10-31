@@ -1568,8 +1568,9 @@ def fit_flux_term(detection: BandDetection, records_dir: str, build_scatter: np.
     ids = np.asarray(detection.cells.ids, np.int64)
     sigma = np.asarray(detection.cells.sigma, np.float64)
     tab = _open_table(records_dir, ids.size, _f32(detection.cells.sigma))
-    rec, rec_row = tab.rows(("plane", "half", "near", "dflux", "flux", "lnr"), np.arange(ids.size))
-    flux = rec["flux"].astype(np.float64)
+    rec, rec_row = tab.rows(("plane", "half", "near", "dflux", "lnr"), np.arange(ids.size))
+    # the injected flux: plane S/N x the CELL_SIGMA of the cell the injection landed in (the table keeps no flux column)
+    flux = snr_grid()[rec["plane"].astype(np.int64)] * sigma[rec_row]
     fg = np.asarray(flux_grid_mjy, float)
     sel = (rec["half"] == 0) & ~rec["near"].astype(bool) & (flux >= fg.min()) & (flux <= fg.max())
     row = rec_row[sel].astype(np.int64)
