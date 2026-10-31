@@ -898,6 +898,23 @@ def _open_table(records_dir: str, n_row: int, sigma: Optional[np.ndarray] = None
 # ----------------------------------------------------------------------------------------------------------------------
 # pooling and the estimator
 
+#: the flux-proportional error term (FIX_SPEC sec 12; science M1/M6 variance fits; brief R2 C2): per noise class, per band,
+#: per map, SIGMA^2 = (CELL_SIGMA x SCATTER)^2 + (EPS_FLUX x F)^2, fitted on the BUILD half under every non-legacy rule.
+#: Noise classes as C2 reads them: a cell is noisy where its CELL_SIGMA exceeds this factor x its map's median CELL_SIGMA.
+FLUX_TERM_NOISY_FACTOR = 2.0
+FLUX_TERM_CLASSES = ("quiet", "noisy")
+#: a plane enters the fit with at least this many build-half residuals (the C2 bar's own count, checks.C2_MIN_RESIDUALS)
+FLUX_TERM_MIN_RESIDUALS = 200
+#: the 16-84 % interval of EPS_FLUX: Poisson bootstrap over cells (whole cells, so neighbouring injections stay together)
+FLUX_TERM_BOOTSTRAP = 200
+FLUX_TERM_SEED = 20261031
+EPS_FLUX_DATASET = "EPS_FLUX_%s"
+EPS_FLUX_UNITS = "relative flux (a fraction of the source flux; dimensionless)"
+EPS_FLUX_READING = ("The part of a source's flux error that grows in proportion to the source's flux, one value per noise "
+                    "class (quiet, noisy: a cell is noisy where its noise exceeds twice the map's median). A source's "
+                    "total error is the square root of (the cell's error from the artificial-source scatter)^2 + "
+                    "(EPS_FLUX x its flux)^2.")
+
 POOLING_CLASSES = ("none", "window", "window_edge", "window_gradient")
 #: PRODUCTION estimator (owner's ruling 2026-10-31): pool only cells with CELL_SIGMA within x1.5 of the target's
 #: (the window restores the ruled calibration of noisy cells on their own residuals, FIX_SPEC sec 8, 12); the
@@ -1418,14 +1435,17 @@ class BandCompleteness:
     bias: np.ndarray
     held: dict
     stats: dict
+    eps_flux: Optional[dict] = None
 
 
 def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, stats: dict,
-                  flux_grid_mjy: np.ndarray) -> BandCompleteness:
+                  flux_grid_mjy: np.ndarray, rule: Optional[PoolingRule] = None,
+                  records_dir: Optional[str] = None) -> BandCompleteness:
     """The band from its pooling blocks (`_assemble_tile` + `_band_dict`): rows in cell-id order (FROZEN 4); every row
     filled exactly once. `held`, `stats`: `held_and_stats`. `held` gains build_errors (C2), and the held-out half's own
     curve and pooled totals built exactly as the stored curve (`curve`, `curve_total`: C1, per class under a gradient
-    curve)."""
+    curve). With `rule` (non-legacy) and `records_dir`: the flux-proportional term `fit_flux_term` on the build half, as
+    `eps_flux` (also held["eps_flux"]); None otherwise (the legacy rule: not applied). Contract change: keywords added."""
     n_row = np.asarray(detection.cells.ids).size
     n_plane = flux_grid_mjy.size
     if not pooled:
@@ -1468,7 +1488,132 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
                  nan_cellplanes=int((~np.isfinite(errs["scatter"])).sum()),
                  nan_build_cellplanes=int((~np.isfinite(build_errs["scatter"])).sum()))
     held["stats"] = [stats]
-    return BandCompleteness(detection, curve, f90, n_pos, errs["scatter"], errs["bias"], held, stats)
+    eps = None
+    if rule is not None and records_dir is not None and not rule.is_legacy:
+        eps = fit_flux_term(detection, records_dir, build_errs["scatter"], flux_grid_mjy, rule)
+        held["eps_flux"] = eps
+    return BandCompleteness(detection, curve, f90, n_pos, errs["scatter"], errs["bias"], held, stats, eps)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# the flux-proportional error term
+
+def noise_classes(sigma: np.ndarray, cell_map: Optional[np.ndarray] = None) -> np.ndarray:
+    """Per row 0 (quiet) or 1 (noisy): CELL_SIGMA > FLUX_TERM_NOISY_FACTOR x the median CELL_SIGMA of the row's map
+    (`cell_map`; one map when None), the classes C2 reads."""
+    sigma = np.asarray(sigma, np.float64)
+    cm = np.zeros(sigma.size, np.int64) if cell_map is None else np.asarray(cell_map, np.int64)
+    med = np.full(sigma.size, np.nan)
+    for m in np.unique(cm):
+        sel = cm == m
+        med[sel] = np.median(sigma[sel])
+    return (sigma > FLUX_TERM_NOISY_FACTOR * med).astype(np.int8)
+
+
+def _read_at_flux(values: np.ndarray, flux_grid_mjy: np.ndarray, row: np.ndarray, flux: np.ndarray) -> np.ndarray:
+    """values (n_row, n_flux) on the flux grid (bright to faint) read at each (row, flux), linear in log flux between the
+    bracketing planes, held at the grid's ends (`pacs_completeness._at_injected_flux`, the reading C2 uses)."""
+    lf = np.log10(np.asarray(flux_grid_mjy, float)[::-1])
+    t = np.interp(np.log10(np.asarray(flux, float)), lf, np.arange(lf.size, dtype=float))
+    k0 = np.minimum(np.floor(t).astype(np.int64), lf.size - 2)
+    w = t - k0
+    v = np.asarray(values, np.float64)[:, ::-1]
+    return v[row, k0] * (1.0 - w) + v[row, k0 + 1] * w
+
+
+def _robust_var(v: np.ndarray) -> float:
+    s = MAD_TO_SIGMA * np.median(np.abs(v - np.median(v)))
+    return float(s * s)
+
+
+def _eps_fit(z: np.ndarray, x: np.ndarray, plane: np.ndarray, weight: Optional[np.ndarray] = None) -> Tuple[float, int]:
+    """eps from residuals z = dflux / S and x = (F / S)^2: per S/N plane with >= FLUX_TERM_MIN_RESIDUALS residuals,
+    y = robust var(z) - 1 = eps^2 <x>; weighted non-negative least squares over the planes (weight n / (2 var(z)^2), the
+    inverse variance of a variance estimate); (eps, planes used). `weight`: per-residual integer multiplicity (bootstrap)."""
+    num = den = 0.0
+    used = 0
+    for p in np.unique(plane):
+        sel = plane == p
+        zz, xx = z[sel], x[sel]
+        if weight is not None:
+            zz, xx = np.repeat(zz, weight[sel]), np.repeat(xx, weight[sel])
+        n = zz.size
+        if n < FLUX_TERM_MIN_RESIDUALS:
+            continue
+        v = _robust_var(zz)
+        if not np.isfinite(v) or v <= 0:
+            continue
+        w = n / (2.0 * v * v)
+        xm = float(np.mean(xx))
+        num += w * xm * (v - 1.0)
+        den += w * xm * xm
+        used += 1
+    if used == 0 or den <= 0:
+        return 0.0, used
+    return float(np.sqrt(max(num / den, 0.0))), used
+
+
+def fit_flux_term(detection: BandDetection, records_dir: str, build_scatter: np.ndarray, flux_grid_mjy: np.ndarray,
+                  rule: PoolingRule, cell_map: Optional[np.ndarray] = None) -> Optional[dict]:
+    """The flux-proportional error term per noise class (FIX_SPEC sec 12; brief R2 C2): over the BUILD half's far
+    residuals inside the flux grid, the excess of their variance over the pooled SCATTER of the build half,
+    var(dflux) - (CELL_SIGMA x SCATTER)^2 = (eps x F)^2, fitted in units of the read SCATTER (z = dflux / S,
+    var(z) - 1 = eps^2 (F / S)^2) per S/N plane, weighted NNLS over planes with >= FLUX_TERM_MIN_RESIDUALS residuals,
+    eps >= 0. The constant term is the per-plane SCATTER's; only eps is fitted. `build_scatter`: held["build_errors"]
+    ["scatter"] (mJy; a leading class axis under a gradient pooling class, each injection reading its own |ln r| class).
+    None under the legacy rule (eps not applied). Returns {class: eps, class + "_lo"/"_hi": 16/84 % bootstrap over cells,
+    class + "_n": residuals, class + "_planes": planes used}."""
+    if rule.is_legacy:
+        return None
+    ids = np.asarray(detection.cells.ids, np.int64)
+    sigma = np.asarray(detection.cells.sigma, np.float64)
+    tab = _open_table(records_dir, ids.size, _f32(detection.cells.sigma))
+    rec, rec_row = tab.rows(("plane", "half", "near", "dflux", "flux", "lnr"), np.arange(ids.size))
+    flux = rec["flux"].astype(np.float64)
+    fg = np.asarray(flux_grid_mjy, float)
+    sel = (rec["half"] == 0) & ~rec["near"].astype(bool) & (flux >= fg.min()) & (flux <= fg.max())
+    row = rec_row[sel].astype(np.int64)
+    plane, flux, dflux = rec["plane"][sel].astype(np.int64), flux[sel], rec["dflux"][sel].astype(np.float64)
+    sb = np.asarray(build_scatter)
+    if sb.ndim == 3:
+        g = _gradient_class(rec["lnr"][sel], rule.gradient_boundary)
+        s = np.where(g == 1, _read_at_flux(sb[1], fg, row, flux), _read_at_flux(sb[0], fg, row, flux))
+    else:
+        s = _read_at_flux(sb, fg, row, flux)
+    good = np.isfinite(s) & (s > 0)
+    cls = noise_classes(sigma, cell_map)[row]
+    rng = np.random.default_rng(FLUX_TERM_SEED)
+    out = {}
+    for c, name in enumerate(FLUX_TERM_CLASSES):
+        m = good & (cls == c)
+        z, x, pl, rr = dflux[m] / s[m], (flux[m] / s[m]) ** 2, plane[m], row[m]
+        eps, used = _eps_fit(z, x, pl)
+        boot = []
+        if used:
+            for _ in range(FLUX_TERM_BOOTSTRAP):
+                k = rng.poisson(1.0, ids.size)
+                boot.append(_eps_fit(z, x, pl, k[rr])[0])
+        lo, hi = (np.percentile(boot, [16, 84]) if boot else (np.nan, np.nan))
+        out.update({name: eps, name + "_lo": float(lo), name + "_hi": float(hi), name + "_n": int(m.sum()),
+                    name + "_planes": int(used)})
+    return out
+
+
+def eps_rows(eps_flux: Optional[dict], sigma: np.ndarray, cell_map: Optional[np.ndarray] = None) -> np.ndarray:
+    """Per row, its noise class's EPS_FLUX (zeros when `eps_flux` is None: the legacy rule)."""
+    sigma = np.asarray(sigma, np.float64)
+    if eps_flux is None:
+        return np.zeros(sigma.size)
+    return np.array([eps_flux[n] for n in FLUX_TERM_CLASSES], np.float64)[noise_classes(sigma, cell_map)]
+
+
+def flux_sigma(scatter_mjy: np.ndarray, eps: np.ndarray, flux: np.ndarray) -> np.ndarray:
+    """SIGMA at every read (detections and ORIGIN-3 bounds): sqrt((CELL_SIGMA x SCATTER)^2 + (eps x F)^2), the SCATTER
+    read at F in mJy (`calibrated_sigma`'s value), `eps` the row's class value (`eps_rows`), F the source's flux in mJy.
+    With eps = 0 the SCATTER itself, unchanged."""
+    s = np.asarray(scatter_mjy, np.float64)
+    e = np.asarray(eps, np.float64) * np.asarray(flux, np.float64)
+    return np.where(e == 0.0, s, np.sqrt(s * s + e * e))
 
 
 def empty_band(n_src: int, n_flux: int) -> BandCompleteness:
