@@ -126,8 +126,9 @@ FALLBACK_MIN = 30
 #: P100 cells (3.2x median CELL_SIGMA, bright nebula) that pooled with quiet and noisy cells and carried their excess
 #: residuals and their high-S/N misses into the neighbours' estimates.
 CROWDED_PERCENTILE = 90
-#: the cell classes (CELL_CLASS_<B>): 0 quiet, 1 noisy (CELL_SIGMA > FLUX_TERM_NOISY_FACTOR x the map's median), 2 crowded
-#: (takes precedence). Under every non-legacy rule the errors' pooling, the completed fallback, the flux term and C2 run
+#: the cell classes (CELL_CLASS_<B>): 0 quiet, 1 noisy (CELL_SIGMA > FLUX_TERM_NOISY_FACTOR x the map's median, crowded
+#: or not), 2 crowded (a crowded cell that is not noisy: low-noise crowded; owner 2026-10-31 14:33, precedence "noisy").
+#: Under every non-legacy rule the errors' pooling, the completed fallback, the flux term and C2 run
 #: per class.
 CELL_CLASSES = ("quiet", "noisy", "crowded")
 #: the S/N planes pooled (36)
@@ -982,9 +983,10 @@ CURVE_CLASSES = ("cell", "gradient")
 FALLBACKS = ("class", "window")
 PRODUCTION_FALLBACK = "class"
 #: which class a cell that is both crowded and noisy (CELL_SIGMA > FLUX_TERM_NOISY_FACTOR x median) takes:
-#: "crowded" (R5, crowded takes precedence) or "noisy"
+#: "crowded" (R5, crowded takes precedence) or "noisy" (production, owner 2026-10-31 14:33: noisy takes precedence, the
+#: crowded class = low-noise crowded cells)
 PRECEDENCES = ("crowded", "noisy")
-PRODUCTION_PRECEDENCE = "crowded"
+PRODUCTION_PRECEDENCE = "noisy"
 
 
 @dataclass(frozen=True)
@@ -1071,9 +1073,10 @@ def crowding_counts(detection: BandDetection) -> np.ndarray:
 
 
 def cell_classes(detection: BandDetection, precedence: str = PRODUCTION_PRECEDENCE) -> np.ndarray:
-    """Per row the cell class (CELL_CLASSES; owner 2026-10-31 ~13:00): 2 crowded where `crowding_counts` exceeds its
-    CROWDED_PERCENTILE over the map's cells, else 1 noisy where CELL_SIGMA > FLUX_TERM_NOISY_FACTOR x the map's median,
-    else 0 quiet. `precedence` "noisy": a noisy cell stays noisy when it is also crowded. Cached per detection."""
+    """Per row the cell class (CELL_CLASSES): 1 noisy where CELL_SIGMA > FLUX_TERM_NOISY_FACTOR x the map's median,
+    2 crowded where `crowding_counts` exceeds its CROWDED_PERCENTILE over the map's cells and the cell is not noisy
+    (low-noise crowded), else 0 quiet: `precedence` "noisy" (production, owner 2026-10-31 14:33). `precedence`
+    "crowded" (R5): crowded wins over noisy. Cached per detection."""
     if precedence not in PRECEDENCES:
         raise ValueError("precedence %r" % (precedence,))
     key = (id(detection), precedence)

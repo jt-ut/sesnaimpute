@@ -175,7 +175,7 @@ def merge_sources(config, bands: Dict[str, BandCompleteness], mosaics: Dict[str,
     """The bands' blind detections merged across bands (planner ruling 2026-10-28): pairs within the pair's merge radius
     are one source (each band once, nearest first, brightest first); position = the sharpest detecting band's; each
     detecting band's flux = Mosaic.aperture at its own detection position; SIGMA = CELL_SIGMA x calibrated_sigma.
-    Identity: `pacs_completeness.merge_sources` (pacs_completeness.py:1844) bit-identical.
+    Its output was gated bit-identical to the retired single-module build's merge (R2-R3 identity gate).
 
     `bands` has an entry per band (an empty one for a band with no map); `mosaics` only the bands that have one."""
     pk = {b: bands[b].detection.peaks for b in BANDS}

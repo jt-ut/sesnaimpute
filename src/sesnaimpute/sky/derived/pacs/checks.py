@@ -372,7 +372,7 @@ def completeness_c2(band: str, completeness: dict, held: dict) -> List[CheckRow]
     flux = held["flux"].astype(np.float64)
     median_sigma = np.array([np.median(d["sigma"][d["cell_map"] == m]) if (d["cell_map"] == m).any() else np.nan
                              for m in range(d["map_id"].size)])
-    if "cell_class" in d:                    # CELL_CLASS_<B>: quiet / noisy / crowded (owner 2026-10-31 ~13:00)
+    if "cell_class" in d:                    # CELL_CLASS_<B>: quiet / noisy / crowded = low-noise crowded (owner 2026-10-31 14:33)
         cc = np.asarray(d["cell_class"], np.int64)
         classes = [(name, cc[row] == c) for c, name in enumerate(inject.CELL_CLASSES)]
     else:
