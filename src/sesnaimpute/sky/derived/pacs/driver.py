@@ -98,6 +98,9 @@ SYSTEM_REQUIRED = ("account", "software", "env_script", "slurm_dir")
 STAGES_MODULE = "sesnaimpute.sky.derived.pacs.stages"
 DRIVER_MODULE = "sesnaimpute.sky.derived.pacs.driver"
 CURATED_MODULE = "sesnaimpute.catalog.curated"
+#: the finish job also rebuilds the region's eleven-band completeness product (catalog.completeness copies the new PACS
+#: curves per source), so the fit's inputs are complete the moment the PACS products exist (owner 2026-10-31: phase 3 chained)
+COMPLETENESS_MODULE = "sesnaimpute.catalog.completeness"
 
 
 @dataclass(frozen=True)
@@ -272,10 +275,11 @@ def _chain(config, config_path: str, region: str, system: Optional[System], box=
                         (w(DRIVER_MODULE, "inject-band", "--band", b, "--of", k, *launch),
                          w(DRIVER_MODULE, "pool-band", "--band", b, "--of", k, *launch)), ()))
     curated = (python, "-W", "ignore", "-m", CURATED_MODULE, config_path, "--regions", region)
+    completeness = (python, "-W", "ignore", "-m", COMPLETENESS_MODULE, config_path, "--regions", region)
     empty = tuple(w(STAGES_MODULE, "pool", "--band", b) for b in BANDS if b not in mapped)
     jobs.append(Job("pacs_%s_finish" % tag, "finish", "", 1,
                     "" if laptop else wall_limit(system.rates["FINISH_MIN"]),
-                    empty + (w(STAGES_MODULE, "finish"), curated), tuple(j.name for j in jobs)))
+                    empty + (w(STAGES_MODULE, "finish"), curated, completeness), tuple(j.name for j in jobs)))
     return jobs
 
 
