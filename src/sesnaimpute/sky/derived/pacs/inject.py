@@ -119,11 +119,17 @@ MAP_MIN = 2
 #: the map (the excess is constant across S/N: S140, Taurus, Aquila, M8), so a class of a few dozen cells still gives
 #: thousands of residuals. Never the plain all-cell pool for a cell with a noise window.
 FALLBACK_MIN = 30
-#: owner 2026-10-31 (after M7): the injection rounds continue for a cell until the sampling error of its FLUX90 (from
-#: its own pooled count and the slope of the widest (x3) pool's smooth curve at the 0.9 crossing, `flux90_precision`;
-#: owner's ruling 2026-10-31) is at most this, relative. Slope 1.1 per dex needs n >= 158 at the crossing.
-#: The MIN_INJECTIONS floor and the MAX_EXTRA_BATCHES cap are unchanged; the legacy rule keeps the floor alone.
-FLUX90_PRECISION = 0.05
+#: owner 2026-10-31 ~13:00: the injection rounds stop at the MIN_INJECTIONS floor (no precision-targeted rounds); the
+#: achieved sampling error of each cell's FLUX90 is stored as FLUX90_ERR_<B> (`flux90_error`), the fit reads CURVE.
+#: The crowded class (owner 2026-10-31 ~13:00): a cell is crowded where the number of the band's own detections within
+#: POOL_ARCSEC of its centre exceeds this percentile of that count over the map's cells. The reason: M7's eight NAN
+#: P100 cells (3.2x median CELL_SIGMA, bright nebula) that pooled with quiet and noisy cells and carried their excess
+#: residuals and their high-S/N misses into the neighbours' estimates.
+CROWDED_PERCENTILE = 90
+#: the cell classes (CELL_CLASS_<B>): 0 quiet, 1 noisy (CELL_SIGMA > FLUX_TERM_NOISY_FACTOR x the map's median), 2 crowded
+#: (takes precedence). Under every non-legacy rule the errors' pooling, the completed fallback, the flux term and C2 run
+#: per class.
+CELL_CLASSES = ("quiet", "noisy", "crowded")
 #: the S/N planes pooled (36)
 N_PLANES = int(round((SNR_LOG_MAX - SNR_LOG_MIN) / SNR_LOG_STEP)) + 1
 
@@ -555,25 +561,21 @@ def _chunks(jobs, n_rows):
     return [[jobs[i] for i in c] for c in np.array_split(np.arange(len(jobs)), k) if c.size]
 
 
-def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[int], np.ndarray],
-                rule: Optional["PoolingRule"] = None, load_recovered: Optional[Callable[[int], np.ndarray]] = None
+def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[int], np.ndarray]
                 ) -> List[InjectionTask]:
     """The ordered pieces of round `r` ([] when the band is complete): round 0 = `first` batches in every block for every
     (plane, half); each later round one more batch per pair over the cells within the pooling radius of a cell that is
-    SHORT, up to MAX_EXTRA_BATCHES. Short: a pair whose pooled count (all earlier rounds) is below MIN_INJECTIONS (the
-    floor, every rule); and, under a non-legacy `rule` with `load_recovered`, the planes around a cell's 0.9 crossing
-    whose FLUX90 sampling error exceeds FLUX90_PRECISION (`_imprecise`, owner 2026-10-31). `load(q)`, `load_recovered(q)`:
-    the (rows x pairs) counts of round q's records and of their recovered ones (`record_counts`; dense or sparse).
+    SHORT, up to MAX_EXTRA_BATCHES. Short: a pair whose pooled count (all earlier rounds) is below MIN_INJECTIONS, the
+    floor, every rule (owner 2026-10-31: no precision-targeted rounds; the achieved FLUX90 sampling error is stored,
+    `flux90_error`). `load(q)`: the (rows x pairs) counts of round q's records (`record_counts`; dense or sparse).
     Identity (legacy rule or none): `pacs_completeness.round_task_list` (pacs_completeness.py:1258) -- same tasks in the
     same order (the old (tile index, inputs) fields drop: one mosaic per band)."""
-    precise = rule is not None and not rule.is_legacy and load_recovered is not None
     pairs = injection_pairs()
     ids = np.asarray(detection.cells.ids, np.int64)
     blocks = injection_blocks(ids, detection.cell_grid.nx)
-    W, W_wide = pool_matrices(detection.cell_grid, ids, np.zeros(ids.size, np.int8), PoolingRule.legacy(),
-                              widenings=(POOL_WIDENINGS[0], POOL_WIDENINGS[-1]))
+    W = pool_matrices(detection.cell_grid, ids, np.zeros(ids.size, np.int8), PoolingRule.legacy(),
+                      widenings=POOL_WIDENINGS[:1])[0]
     count = np.zeros((ids.size, len(pairs)))
-    recovered = np.zeros((ids.size, len(pairs)))
     tasks = []
     for i, blk in enumerate(blocks):
         jobs = [(p, half, tuple(range(first)), None) for p, half in pairs]
@@ -584,15 +586,10 @@ def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[in
             return []
         q = load(extra)
         count += q.toarray() if hasattr(q, "toarray") else np.asarray(q)
-        if precise:
-            q = load_recovered(extra)
-            recovered += q.toarray() if hasattr(q, "toarray") else np.asarray(q)
         tasks = []
         if extra == MAX_EXTRA_BATCHES:
             break
         short = (W @ count) < MIN_INJECTIONS
-        if precise:
-            short |= _imprecise(W @ count, W @ recovered, W_wide @ count, W_wide @ recovered)
         act = short.any(axis=0)
         if not act.any():
             continue
@@ -605,31 +602,32 @@ def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[in
     return tasks if r <= MAX_EXTRA_BATCHES else []
 
 
-def flux90_precision(n: np.ndarray, rec: np.ndarray, n_wide: Optional[np.ndarray] = None,
-                     rec_wide: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Per row and half: the relative sampling error of FLUX90, sqrt(p (1 - p) / n_x) / s_ln, p = FLUX90_FRACTION,
-    s_ln = s / ln(10) the curve's slope per ln F, s = dfrac/dlog10 F (S/N planes are SNR_LOG_STEP dex apart, so log10 F
-    steps alike at fixed CELL_SIGMA). The crossing plane k and the slope s are read from the SMOOTH curve of the widest
-    pool (`n_wide`, `rec_wide`: the x3 widening's pooled counts and recovered; owner's ruling 2026-10-31: a cell's own
-    x1 pool gives a noisy slope), over the planes one below to one above the two bracketing the 0.9 crossing; n_x is the
-    smaller count of the CELL'S OWN pool (`n`) on those two planes. Without the wide pool the cell's own curve gives
-    both (M5/M7's arithmetic). Slope 1.1 per dex: n_x >= 158 for 0.05.
-    Returns (error (rows, 2), crossing plane k (rows, 2; -1 where the curve does not cross 0.9 upward), n_x).
+def flux90_error(n: np.ndarray, rec: np.ndarray, n_wide: Optional[np.ndarray] = None,
+                rec_wide: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per row (and per trailing set: the arrays are (rows, N_PLANES x sets), plane-major, e.g. 2 halves or 1): the
+    relative sampling error of FLUX90, sqrt(p (1 - p) / n_x) / s_ln, p = FLUX90_FRACTION, s_ln = s / ln(10) the curve's
+    slope per ln F, s = dfrac/dlog10 F (S/N planes are SNR_LOG_STEP dex apart, so log10 F steps alike at fixed
+    CELL_SIGMA). The crossing plane k and the slope s are read from the SMOOTH curve of the widest pool (`n_wide`,
+    `rec_wide`: the x3 widening's pooled counts and recovered; owner's ruling 2026-10-31), over the planes one below to one
+    above the two bracketing the 0.9 crossing; n_x is the smaller count of the CELL'S OWN pool (`n`) on those two planes.
+    Without the wide pool the cell's own curve gives both. Stored as FLUX90_ERR_<B> (owner 2026-10-31 ~13:00).
+    Returns (error (rows, sets), crossing plane k (rows, sets; -1 where the curve does not cross 0.9 upward), n_x).
     NaN error where there is no crossing or a flat slope."""
     rows = n.shape[0]
-    n = np.asarray(n, float).reshape(rows, N_PLANES, 2)
+    n = np.asarray(n, float).reshape(rows, N_PLANES, -1)
+    sets = n.shape[2]
     if n_wide is None:
         n_wide, rec_wide = n, rec
-    nw = np.asarray(n_wide, float).reshape(rows, N_PLANES, 2)
-    rw = np.asarray(rec_wide, float).reshape(rows, N_PLANES, 2)
+    nw = np.asarray(n_wide, float).reshape(rows, N_PLANES, sets)
+    rw = np.asarray(rec_wide, float).reshape(rows, N_PLANES, sets)
     with np.errstate(invalid="ignore", divide="ignore"):
         frac = np.where(nw > 0, rw / nw, np.nan)
-    err = np.full((rows, 2), np.nan)
-    kk = np.full((rows, 2), -1, np.int64)
-    nx = np.zeros((rows, 2))
+    err = np.full((rows, sets), np.nan)
+    kk = np.full((rows, sets), -1, np.int64)
+    nx = np.zeros((rows, sets))
     below = frac[:, :-1, :] < FLUX90_FRACTION
     above = frac[:, 1:, :] >= FLUX90_FRACTION
-    cross = below & above                                      # (rows, planes - 1, 2): p_k < 0.9 <= p_k+1
+    cross = below & above                                      # (rows, planes - 1, sets): p_k < 0.9 <= p_k+1
     has = cross.any(axis=1)
     k = np.where(has, cross.argmax(axis=1), -1)                # the faintest crossing
     r, h = np.nonzero(has)
@@ -644,20 +642,6 @@ def flux90_precision(n: np.ndarray, rec: np.ndarray, n_wide: Optional[np.ndarray
     kk[r, h] = k0
     nx[r, h] = n_x
     return err, kk, nx
-
-
-def _imprecise(n: np.ndarray, rec: np.ndarray, n_wide: Optional[np.ndarray] = None,
-               rec_wide: Optional[np.ndarray] = None) -> np.ndarray:
-    """(rows x pairs) True on the planes k - 1 .. k + 2 around each (row, half)'s 0.9 crossing whose FLUX90 sampling error
-    (`flux90_precision`: the widest pool's slope, the cell's own count) exceeds FLUX90_PRECISION: where one more batch
-    narrows FLUX90."""
-    err, k, _n = flux90_precision(n, rec, n_wide, rec_wide)
-    out = np.zeros((n.shape[0], N_PLANES, 2), bool)
-    r, h = np.nonzero(np.isfinite(err) & (err > FLUX90_PRECISION))
-    for d in (-1, 0, 1, 2):
-        pl = np.clip(k[r, h] + d, 0, N_PLANES - 1)
-        out[r, pl, h] = True
-    return out.reshape(n.shape[0], 2 * N_PLANES)
 
 
 def inject_task(config, m: Mosaic, detection: BandDetection, task: InjectionTask, layers: Optional[dict] = None) -> dict:
@@ -960,7 +944,7 @@ def _open_table(records_dir: str, n_row: int, sigma: Optional[np.ndarray] = None
 #: per map, SIGMA^2 = (CELL_SIGMA x SCATTER)^2 + (EPS_FLUX x F)^2, fitted on the BUILD half under every non-legacy rule.
 #: Noise classes as C2 reads them: a cell is noisy where its CELL_SIGMA exceeds this factor x its map's median CELL_SIGMA.
 FLUX_TERM_NOISY_FACTOR = 2.0
-FLUX_TERM_CLASSES = ("quiet", "noisy")
+FLUX_TERM_CLASSES = CELL_CLASSES
 #: a plane enters the fit with at least this many build-half residuals (the C2 bar's own count, checks.C2_MIN_RESIDUALS)
 FLUX_TERM_MIN_RESIDUALS = 200
 #: the 16-84 % interval of EPS_FLUX: Poisson bootstrap over cells (whole cells, so neighbouring injections stay together)
@@ -1051,15 +1035,53 @@ def _gradient_class(lnr: np.ndarray, boundary: float = GRADIENT_BOUNDARY) -> np.
         return (np.abs(np.asarray(lnr, float)) > boundary).astype(np.int8)
 
 
+_CELL_CLASS = {}
+
+
+def crowding_counts(detection: BandDetection) -> np.ndarray:
+    """Per row: the number of the band's own detections (Peaks) within POOL_ARCSEC of the cell's centre, both in the
+    pooling frame (CellGrid.centres_arcsec; a peak's grid pixel x, y scaled alike)."""
+    ids = np.asarray(detection.cells.ids, np.int64)
+    if ids.size == 0:
+        return np.zeros(0, np.int64)
+    cg = detection.cell_grid
+    pk = detection.peaks
+    if pk is None or np.asarray(pk.x).size == 0:
+        return np.zeros(ids.size, np.int64)
+    pxy = np.c_[np.asarray(pk.x, float) * (CELL_ARCSEC / cg.step_x), np.asarray(pk.y, float) * (CELL_ARCSEC / cg.step_y)]
+    return np.asarray(cKDTree(pxy).query_ball_point(cg.centres_arcsec(ids), float(POOL_ARCSEC), return_length=True),
+                      np.int64)
+
+
+def cell_classes(detection: BandDetection) -> np.ndarray:
+    """Per row the cell class (CELL_CLASSES; owner 2026-10-31 ~13:00): 2 crowded where `crowding_counts` exceeds its
+    CROWDED_PERCENTILE over the map's cells, else 1 noisy where CELL_SIGMA > FLUX_TERM_NOISY_FACTOR x the map's median,
+    else 0 quiet. Cached per detection."""
+    key = id(detection)
+    if _CELL_CLASS.get("key") == key and _CELL_CLASS.get("obj") is detection:
+        return _CELL_CLASS["value"]
+    sigma = np.asarray(detection.cells.sigma, np.float64)
+    out = noise_classes(sigma) if sigma.size else np.zeros(0, np.int8)
+    cnt = crowding_counts(detection)
+    if cnt.size:
+        out = np.where(cnt > np.percentile(cnt, CROWDED_PERCENTILE), 2, out).astype(np.int8)
+    _CELL_CLASS.update(key=key, obj=detection, value=out)
+    return out
+
+
 def pool_classes(detection: BandDetection, rule: PoolingRule, edge_ratio_per_cell: Optional[np.ndarray] = None
                  ) -> np.ndarray:
-    """Each row's pooling class under `rule`: 1 for a coverage-edge cell (`edge_ratio_per_cell` = within-cell coverage
-    max/min > rule.edge_ratio) when rule.edge_class, else 0 (all 0 for the legacy rule)."""
+    """Each row's pooling class under `rule`: under every non-legacy rule (a noise window) the cell class
+    (`cell_classes`: quiet / noisy / crowded), plus 3 for a coverage-edge cell (`edge_ratio_per_cell` = within-cell
+    coverage max/min > rule.edge_ratio) when rule.edge_class; all 0 for the legacy rule."""
     n = np.asarray(detection.cells.ids).size
-    if not rule.edge_class or edge_ratio_per_cell is None:
-        return np.zeros(n, np.int8)
-    with np.errstate(invalid="ignore"):
-        return (np.asarray(edge_ratio_per_cell, float) > rule.edge_ratio).astype(np.int8)
+    out = np.zeros(n, np.int8)
+    if rule.noise_window is not None and n:
+        out = cell_classes(detection).astype(np.int8)
+    if rule.edge_class and edge_ratio_per_cell is not None:
+        with np.errstate(invalid="ignore"):
+            out = out + 3 * (np.asarray(edge_ratio_per_cell, float) > rule.edge_ratio).astype(np.int8)
+    return out
 
 
 def _keep(rows_i: np.ndarray, cols_j: np.ndarray, classes: np.ndarray, rule: PoolingRule,
@@ -1466,11 +1488,18 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
         return o
 
     out = curve_of(build)
+    # FLUX90_ERR (owner 2026-10-31 ~13:00): the build half's sampling error of FLUX90, the cell's own (x1) pooled count,
+    # the slope and crossing from the widest (x3) pool's curve, both on main's pooling (the pools behind CURVE)
+    key = build["row"].astype(np.int64) * N_PLANES + build["plane"].astype(np.int64)
+    t_all = np.bincount(key, minlength=n_loaded * N_PLANES).reshape(n_loaded, N_PLANES).astype(np.float64)
+    r_all = np.bincount(key, weights=build["recovered"].astype(np.float64),
+                        minlength=n_loaded * N_PLANES).reshape(n_loaded, N_PLANES)
+    out["flux90_err"] = flux90_error(curve_Ws[0] @ t_all, None, curve_Ws[-1] @ t_all, curve_Ws[-1] @ r_all)[0][:, 0]
     hm = ~bm
     held_c = curve_of({k: rec[k][hm] for k in ("row", "plane", "recovered", "near", "dflux", "lnr")})
     out["held_curve"], out["held_total"] = held_c["curve"], held_c["pooled_total"]
     fb = np.asarray(tab.data["fallback"]) if (rule.short_rule == "widen" and "fallback" in tab.data) else None
-    edge_out = classes_all[out_rows] if rule.edge_class else None
+    edge_out = (classes_all[out_rows] // 3) if rule.edge_class else None
 
     def errors(r, set_index):
         e = []
@@ -1533,6 +1562,8 @@ class BandCompleteness:
     held: dict
     stats: dict
     eps_flux: Optional[dict] = None
+    flux90_err: Optional[np.ndarray] = None
+    cell_class: Optional[np.ndarray] = None
 
 
 def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, stats: dict,
@@ -1563,6 +1594,7 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
     errs = {k: arr(el, (n_row, n_plane), np.float32, np.nan) for k in ("scatter", "bias")}
     build_errs = {k: arr(el, (n_row, n_plane), np.float32, np.nan) for k in ("scatter", "bias")}
     filled = np.zeros(n_row, bool)
+    f90_err = np.full(n_row, np.nan, np.float32)
     widen = {}
     for o in pooled:
         r = o["rows"]
@@ -1570,6 +1602,8 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
         filled[r] = True
         curve[..., r, :], f90[..., r], n_pos[..., r], tot[..., r, :] = o["curve"], o["flux90"], o["n_pos"], o["pooled_total"]
         h_curve[..., r, :], h_tot[..., r, :] = o["held_curve"], o["held_total"]
+        if "flux90_err" in o:
+            f90_err[r] = o["flux90_err"]
         for k in errs:
             errs[k][..., r, :] = o["errors"][k]
             build_errs[k][..., r, :] = o["build_errors"][k]
@@ -1589,7 +1623,9 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
     if rule is not None and records_dir is not None and not rule.is_legacy:
         eps = fit_flux_term(detection, records_dir, build_errs["scatter"], flux_grid_mjy, rule)
         held["eps_flux"] = eps
-    return BandCompleteness(detection, curve, f90, n_pos, errs["scatter"], errs["bias"], held, stats, eps)
+    cls = cell_classes(detection).astype(np.int8)
+    held["cell_class"] = cls
+    return BandCompleteness(detection, curve, f90, n_pos, errs["scatter"], errs["bias"], held, stats, eps, f90_err, cls)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -1679,7 +1715,7 @@ def fit_flux_term(detection: BandDetection, records_dir: str, build_scatter: np.
     else:
         s = _read_at_flux(sb, fg, row, flux)
     good = np.isfinite(s) & (s > 0)
-    cls = noise_classes(sigma, cell_map)[row]
+    cls = cell_classes(detection)[row]
     rng = np.random.default_rng(FLUX_TERM_SEED)
     out = {}
     for c, name in enumerate(FLUX_TERM_CLASSES):
@@ -1697,12 +1733,17 @@ def fit_flux_term(detection: BandDetection, records_dir: str, build_scatter: np.
     return out
 
 
-def eps_rows(eps_flux: Optional[dict], sigma: np.ndarray, cell_map: Optional[np.ndarray] = None) -> np.ndarray:
-    """Per row, its noise class's EPS_FLUX (zeros when `eps_flux` is None: the legacy rule)."""
-    sigma = np.asarray(sigma, np.float64)
+def eps_rows(eps_flux, cell_class: np.ndarray) -> np.ndarray:
+    """Per row, its cell class's EPS_FLUX (`cell_class`: CELL_CLASS, `cell_classes`); zeros when `eps_flux` is None (the
+    legacy rule). `eps_flux`: the fit's dict, or the product's EPS_FLUX_<B> array (classes x 4, column 0 the value)."""
+    cell_class = np.asarray(cell_class, np.int64)
     if eps_flux is None:
-        return np.zeros(sigma.size)
-    return np.array([eps_flux[n] for n in FLUX_TERM_CLASSES], np.float64)[noise_classes(sigma, cell_map)]
+        return np.zeros(cell_class.size)
+    if isinstance(eps_flux, dict):
+        v = np.array([eps_flux[n] for n in FLUX_TERM_CLASSES], np.float64)
+    else:
+        v = np.asarray(eps_flux, np.float64)[:, 0]
+    return v[cell_class]
 
 
 def flux_sigma(scatter_mjy: np.ndarray, eps: np.ndarray, flux: np.ndarray) -> np.ndarray:

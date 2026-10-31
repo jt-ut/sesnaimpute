@@ -247,7 +247,7 @@ def merge_sources(config, bands: Dict[str, BandCompleteness], mosaics: Dict[str,
         extended[b][k] = ext
         offset[b][k[hit]] = bands[b].detection.cells.offset[row[hit]]
         if hit.any():
-            eps = inject.eps_rows(bands[b].eps_flux, bands[b].detection.cells.sigma)[row[hit]]
+            eps = inject.eps_rows(bands[b].eps_flux, inject.cell_classes(bands[b].detection))[row[hit]]
             sigma[b][k[hit]] = inject.flux_sigma(calibrated_sigma(bands[b].scatter[row[hit]], flux_grid_mjy, f[hit]), eps,
                                                  f[hit])
     for b in BANDS:

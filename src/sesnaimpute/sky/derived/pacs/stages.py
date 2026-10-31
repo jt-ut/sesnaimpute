@@ -710,8 +710,7 @@ def _round_tasks(config, region, band, r, box=None) -> list:
     det, attrs = _detection(config, region, band, box)
     if det is None or r > MAX_EXTRA_BATCHES:
         return []
-    return inject.round_tasks(det, int(attrs["first"]), r, lambda q: _round_counts(config, region, box, band, q),
-                              _pooling_rule(), lambda q: _round_counts(config, region, box, band, q, "counts/rec"))
+    return inject.round_tasks(det, int(attrs["first"]), r, lambda q: _round_counts(config, region, box, band, q))
 
 
 def _round_task_count(config, region, band, r, box=None) -> int:

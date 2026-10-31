@@ -3994,11 +3994,21 @@ _PACS_GRADIENT_READINGS = {
     "N_POS_GRADIENT_{b}": ("injections",
         "N_POS_{b} for CURVE_GRADIENT_{b}: the artificial sources behind its value at the faintest plane."),
     "EPS_FLUX_{b}": ("relative flux (a fraction of the source flux; dimensionless)",
-        "The part of a {w} micron source's flux error that grows in proportion to its flux, one row per cell noise class "
-        "(row 0: quiet cells; row 1: noisy cells, CELL_SIGMA_{b}_MJY above 2 times the map's median), columns: the "
+        "The part of a {w} micron source's flux error that grows in proportion to its flux, one row per cell class of "
+        "CELL_CLASS_{b} (row 0: quiet cells; row 1: noisy cells; row 2: crowded cells), columns: the "
         "value, its 16 and 84 per cent bootstrap bounds over cells, and the number of artificial sources it was fitted "
         "on. A source's flux uncertainty is the square root of (SCATTER_{b}_MJY read at its flux)^2 plus (this value "
         "times its flux)^2."),
+    "FLUX90_ERR_{b}": ("relative (a fraction of the cell's FLUX90; dimensionless)",
+        "Statistical error of FLUX90 from the number of injections pooled and the curve's slope; the fit reads CURVE, not "
+        "FLUX90. It is the binomial error of the recovered fraction at 0.9 for the artificial sources pooled at the "
+        "cell (the build half), divided by how steeply the cell's wider-area curve rises there. Not a number where the "
+        "curve never reaches 0.9."),
+    "CELL_CLASS_{b}": ("class code (0, 1 or 2)",
+        "The cell's class for the {w} micron flux errors: 0 quiet; 1 noisy (CELL_SIGMA_{b}_MJY above 2 times the map's "
+        "median); 2 crowded (more PACS detections of this band within 120 arcsec of the cell centre than 90 per cent "
+        "of the map's cells have; takes precedence). A cell's SCATTER_{b}_MJY and BIAS_{b}_MJY pool only cells of its "
+        "own class, and EPS_FLUX_{b} holds one row per class."),
 }
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_u, _r) in _PACS_GRADIENT_READINGS.items():

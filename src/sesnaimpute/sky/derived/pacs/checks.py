@@ -98,8 +98,13 @@ BAR_SEED = 1
 C2_BAR = (0.90, 1.10)
 C2_MIN_RESIDUALS = 200
 C2_BIAS_BAR_PERCENT = 1.0
-#: a cell is noisy where its CELL_SIGMA exceeds this multiple of its map's median
+#: a cell is noisy where its CELL_SIGMA exceeds this multiple of its map's median (products without CELL_CLASS only)
 C2_NOISY_FACTOR = 2.0
+#: owner 2026-10-31 ~13:00: a C2 row passes where |ratio - 1| <= max(C2_BAR half-width, C2_SAMPLING_K x
+#: C2_SAMPLING_SD / sqrt(n)): the bar widened by the sampling error of a 1.4826-MAD scatter of n Gaussian residuals
+#: (sd 1.16 / sqrt(n) relative), 2.5 of it; rows with n < C2_MIN_RESIDUALS stay INFO
+C2_SAMPLING_SD = 1.16
+C2_SAMPLING_K = 2.5
 #: the gradient class: |ln r| above this, r = aperture-box coverage / cell coverage (FIX_SPEC sec 12)
 GRADIENT_LN_R = 0.03
 #: detection report (RULINGS_5): recovery of held-out injections at S/N >= 20 is at least 0.99; sky bins of the floor
@@ -367,8 +372,12 @@ def completeness_c2(band: str, completeness: dict, held: dict) -> List[CheckRow]
     flux = held["flux"].astype(np.float64)
     median_sigma = np.array([np.median(d["sigma"][d["cell_map"] == m]) if (d["cell_map"] == m).any() else np.nan
                              for m in range(d["map_id"].size)])
-    noisy = d["sigma"] > C2_NOISY_FACTOR * median_sigma[d["cell_map"]]
-    classes = [("quiet", ~noisy[row]), ("noisy", noisy[row])]
+    if "cell_class" in d:                    # CELL_CLASS_<B>: quiet / noisy / crowded (owner 2026-10-31 ~13:00)
+        cc = np.asarray(d["cell_class"], np.int64)
+        classes = [(name, cc[row] == c) for c, name in enumerate(inject.CELL_CLASSES)]
+    else:
+        noisy = d["sigma"] > C2_NOISY_FACTOR * median_sigma[d["cell_map"]]
+        classes = [("quiet", ~noisy[row]), ("noisy", noisy[row])]
     if "lnr" in held:
         with np.errstate(invalid="ignore"):
             classes.append(("gradient", np.abs(np.asarray(held["lnr"], float)) > GRADIENT_LN_R))
@@ -377,7 +386,8 @@ def completeness_c2(band: str, completeness: dict, held: dict) -> List[CheckRow]
     s_build = np.full(row.size, np.nan)
     s_build[ap] = _at_injected_flux(e["scatter"], d["flux"], row[ap], flux[ap])
     # the same SIGMA the products give a detection: with the flux-proportional term where the build fitted one
-    eps = inject.eps_rows(held.get("eps_flux"), d["sigma"])
+    eps = inject.eps_rows(held.get("eps_flux"), d["cell_class"] if "cell_class" in d
+                          else np.zeros(d["sigma"].size, np.int64))
     s_build[ap] = inject.flux_sigma(s_build[ap], eps[row[ap]], flux[ap])
     rows: List[CheckRow] = []
     n_nan = int(np.sum(ap & ~np.isfinite(s_build)))
@@ -391,9 +401,12 @@ def completeness_c2(band: str, completeness: dict, held: dict) -> List[CheckRow]
                 z = residual[sel] / s_build[sel]
                 value = _robust(z)
                 name = "C2_%s_%s_BIN%d" % (prefix, label.upper(), j)
-                detail = "normalised scatter of the held-out residuals; expected 1.02 +/- 0.05"
-                if sel.sum() >= C2_MIN_RESIDUALS:
-                    rows.append(_row(name, band, value, C2_BAR[0], C2_BAR[1], detail, n=int(sel.sum())))
+                n = int(sel.sum())
+                half = max(0.5 * (C2_BAR[1] - C2_BAR[0]), C2_SAMPLING_K * C2_SAMPLING_SD / np.sqrt(max(n, 1)))
+                detail = ("normalised scatter of the held-out residuals; expected 1.02 +/- 0.05; bar 1 +/- max(0.10, "
+                          "2.5 x 1.16 / sqrt(n)) = 1 +/- %.3f" % half)
+                if n >= C2_MIN_RESIDUALS:
+                    rows.append(_row(name, band, value, 1.0 - half, 1.0 + half, detail, n=n))
                 else:
                     rows.append(_row(name, band, value, detail="fewer than %d residuals" % C2_MIN_RESIDUALS, n=int(sel.sum()), info=True))
 
