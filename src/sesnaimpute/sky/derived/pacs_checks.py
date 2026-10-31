@@ -27,7 +27,8 @@ import numpy as np
 
 from sesnaimpute.sky.derived import pacs_mosaic
 from sesnaimpute.sky.derived.pacs_fit import (_aperture_core, _template_density, read_index)
-from sesnaimpute.sky.derived.pacs_psf import APERTURES, aperture_eef, published_components_for_map
+from sesnaimpute.sky.derived.pacs_psf import aperture_eef, published_components_for_map
+from sesnaimpute.definitions import PACS_APERTURES as APERTURES
 
 TIE_TOLERANCE = 0.003            # real (normalised to the release EEF) against the divisor; injected against real
 RELEASE_TOLERANCE = 0.015        # A_direct / EEF: the release template against the release EEF (60 arcsec/s: -0.7 %)

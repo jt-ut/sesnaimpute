@@ -54,22 +54,17 @@ from sesnaimpute.config import product_path
 from sesnaimpute.sky.derived import pacs_fit
 from sesnaimpute.sky.derived.pacs_fit import DETECTION_SNR
 from sesnaimpute.sky.download.herschel_pacs.index import read_index
+from sesnaimpute.definitions import PACS_BANDS as BANDS
+from sesnaimpute.definitions import PACS_BLEND_RADIUS_BEAMS as BLEND_RADIUS_BEAMS
+from sesnaimpute.definitions import PACS_SNR_BIN_CENTRES as SNR_BIN_CENTRES
+from sesnaimpute.definitions import PACS_SNR_BIN_EDGES as SNR_BIN_EDGES
 
-BANDS = ("P70", "P100", "P160")
 #: least sources in one photometry piece (a piece costs a few ms of overhead; a source about 3 ms)
 PHOTOMETRY_PIECE_MIN = 2000
 
 #: the pipeline's origin codes for a flux (`ORIGIN_FNU` in the source table)
 ORIGIN_DETECTED, ORIGIN_BOUND, ORIGIN_UNDETECTED, ORIGIN_NOT_COVERED = 1, 3, 90, 91
 
-#: a detection fitted wider than this many beam widths is flagged extended
-#: (SPEC 11.3 step 3); the width is `pacs_fit.Tile.fitted_fwhm`, the beam
-#: broadened by a Gaussian chosen by chi-square
-EXTENDED_BEAM_FACTOR = 1.5
-#: a source within this many beam FWHM of another source's detection is an unseparable blend (ORIGIN 3) unless it is
-#: the brighter member: the far-infrared survey convention (HOPS/eHOPS flag close pairs the same way; planner ruling,
-#: owner-approved 2026-10-28)
-BLEND_RADIUS_BEAMS = 1.0
 
 #: the SESNA association of the region's PACS sources (planner ruling, owner-approved 2026-10-29: Rob Gutermuth's
 #: band-merging recipe as eHOPS applies it, Pokhrel et al. 2023 Sect. III.2 and Appendix C): nearest neighbour within a
@@ -94,10 +89,6 @@ def _unit_vectors(ra_deg, dec_deg):
 # ---------------------------------------------------------------------------
 # the singleton pass and the calibrated sigma
 
-#: bins of injected S/N (F / CELL_SIGMA) in which the completeness stage's C2 checks the measured error: < 8, 8-30,
-#: 30-120, >= 120
-SNR_BIN_EDGES = (8.0, 30.0, 120.0)
-SNR_BIN_CENTRES = (5.7, 15.5, 60.0, 240.0)
 
 
 def singleton_pass(tile, ra, dec, shift, sigma_cell, offset):

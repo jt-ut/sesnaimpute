@@ -40,9 +40,6 @@ from sesnaimpute.config import product_path
 NSIDE = 512
 # PACS observing modes of the archive: 1 = scan map, 31 = SPIRE/PACS parallel.
 SCAN_MODE, PARALLEL_MODE = 1, 31
-# Extension names the archive gives the three layers, and the header text
-# that documents the noise layer as the standard deviation of the pixel mean.
-STDEV_DOC = "the standard deviation of the pixel mean flux."
 
 
 @dataclasses.dataclass(frozen=True)

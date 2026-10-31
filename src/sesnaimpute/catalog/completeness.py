@@ -66,6 +66,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import PACS_COPIED as _PACS_COPIED, REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.catalog import depth_grid as depth_grid_module
+from sesnaimpute.definitions import COMPLETENESS_STORAGE_SCALE as STORAGE_SCALE
 
 #: Measured identical across every one of the survey's 440 cube files
 #: (module docstring): the spectral axis's own step convention, asserted
@@ -305,7 +306,7 @@ TWOMASS_SPAN_WIDTHS = 6.0
 #: 10-20.md "The products"): ~100 injected sources per pixel and bin, so
 #: a stored fraction is exact to 1/600 (not 1/100: some pixels average six
 #: 100-trial estimates) -- storage precision, asserted lossless below.
-STORAGE_SCALE = 600
+#: Defined once: definitions.COMPLETENESS_STORAGE_SCALE (imported above as STORAGE_SCALE).
 
 
 def _to_uint16(fraction):

@@ -26,14 +26,13 @@ nodes (the three bands' jobs run together). `-t` of a job = 3 x its expected min
 import argparse
 import math
 
-BANDS = ("P70", "P100", "P160")
-MAX_EXTRA_BATCHES = 40                      # pacs_completeness.MAX_EXTRA_BATCHES (the round rule is not changed here)
+from sesnaimpute.definitions import PACS_BANDS as BANDS
+from sesnaimpute.definitions import PACS_MAX_EXTRA_BATCHES as MAX_EXTRA_BATCHES
 REF_CPUS = 112
 ROUND0_S = 1812.0 / 3873.0                  # node-s per round-0 task at REF_CPUS
 LATER_S = 4200.0 / (MAX_EXTRA_BATCHES * 3873.0)          # node-s per round-0 task and later round at REF_CPUS
 P100_INJECT_S = (9.6 + 12.3) * 60.0         # P100's measured injection node-s (Orion A)
 POOL_TABLES_MIN, POOL_SHARD_MIN = 2.7, 4.5  # P100 on one node (Orion A)
-DETECT_MIN = {"P70": 21.3, "P100": 6.9, "P160": 12.1}    # one node (Orion A)
 PREPARE_MIN, FINISH_MIN = 40.0, 40.0        # one node: -t 2 h (Orion A measured 6.7 min with its mosaics reused, 8.8 min)
 #: a detect job writes its file only at its end, so a region larger than Orion A must not run out of time: one flat
 #: limit, about 11 x Orion A's P70 (the charge held against the balance is 3 jobs per region)

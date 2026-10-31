@@ -41,14 +41,13 @@ import healpy as hp
 from sesnaimpute.sky.derived.pacs_psf import (APERTURES, CachedPairedPSF, MosaicPSF, MosaicRecord, aperture_eef, aperture_fraction,
                                               beam_fwhm_arcsec, published_components_for_map)
 from sesnaimpute.sky.download.herschel_pacs.index import MapRecord, maps_root, read_index  # noqa: F401
+from sesnaimpute.definitions import PACS_CELL_ARCSEC as CELL_ARCSEC
 
 #: detection threshold in sigma (owner 2026-10-24); defines recovery in the completeness
 DETECTION_SNR = 5.0
 #: rows per strip of the once-per-map preparation (`prepare_map`): every full-map operation runs strip by strip, so
 #: its memory is a few strips of the map's width, whatever the map's size
 PREPARE_STRIP_ROWS = 256
-#: completeness cell side, arcsec (owner 2026-10-24: SESNA's own)
-CELL_ARCSEC = 30.0
 #: fitting-box half-width in beam FWHM (spec 11.3 step 1)
 FIT_BOX_FWHM = 3.0
 #: a pixel is also dropped if its error is below this fraction of the map's median error (a mosaic's: of the error its own
