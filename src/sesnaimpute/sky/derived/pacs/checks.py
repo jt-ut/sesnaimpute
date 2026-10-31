@@ -6,13 +6,13 @@ detail).
 
 Depends on: grid, psf, mosaic, detect, inject, photometry, products. Replaces: pacs_completeness.self_check/_real_check/
 _acceptance_c1/_acceptance_c2/_report_detection/acceptance/_binomial_error/_verdict/_robust/_at_injected_flux,
-pacs_checks.py (all: representative_maps, _aperture_sum, template_in_aperture, unit_source, expected_enclosed,
+pacs_checks.py (all: representative_maps, _aperture_sum, _template_in_aperture, _unit_source, expected_enclosed,
 check_positions, _real_sources, normalisation_check), pacs_photometry.acceptance/_c4_ratio/_read_hops/_match_hops/
 _read_hppsc/hppsc_checks, and the print-only reporting of finish_region. The two normalisation paths (self_check and
 normalisation_check) stay two checks with distinct names (they test different things: the zero-image sky term vs the PSF
 divisor), run from ONE place (stages, stage "psf"). Bars are today's, named constants here, except two the science track
 changed (FIX_SPEC sec 8-12): the C1 FLUX90 half-split share has no flat 90 %, its bar is derived from the map's own counts
-(`flux90_halves_bar`, science/M5_c1_bar.md sec 3), and the HPPSC flux ratio is information.
+(`_flux90_halves_bar`, science/M5_c1_bar.md sec 3), and the HPPSC flux ratio is information.
 
 Row names (value; bar):
   ZERO_IMAGE_WORST (worst |aperture sum / (injected x EEF) - 1|; <= 0.005), ZERO_IMAGE_TEMPLATE (worst |A_direct/EEF - 1|;
@@ -96,6 +96,7 @@ BAR_MAX_CELLS = 20000
 BAR_BLOCK_ARCSEC = 240.0
 BAR_BOOTSTRAP = 400
 BAR_MIN_BLOCKS = 3
+BAR_MIN_UNIT_CELLS = 8          # a (block, repetition) unit with fewer cells is left out of the bootstrap (M5)
 BAR_SEED = 1
 #: C2 (RULINGS_3 D3): expected scatter 1.02 +- 0.05, bar 1.00 +- 0.10 where at least C2_MIN_RESIDUALS residuals; bias bar 1 %
 C2_BAR = (0.90, 1.10)
@@ -222,14 +223,15 @@ def _counts(row, plane, recovered, n_row, n_x):
 # ----------------------------------------------------------------------------------------------------------------------
 # C1
 
-def flux90_halves_bar(completeness: dict, held: dict, reps: int = BAR_REPS, seed: int = BAR_SEED) -> Tuple[float, float, float, int]:
+def _flux90_halves_bar(completeness: dict, held: dict, reps: int = BAR_REPS, seed: int = BAR_SEED) -> Tuple[float, float, float, int]:
     """The derived bar of the C1 FLUX90 share (science/M5_c1_bar.md sec 3): bar = S_hat - 2 sigma, from the map's OWN
     stored pooled counts and curves. Per (cell, S/N plane) the truth p is the pooled recovered fraction of both halves on the
-    widening the held half chose (the build half's records when `held` carries build_row/build_plane/build_recovered; else
-    the held half alone, which roughens the curves a little and so lowers the bar), the two halves are drawn Binomial(n, p)/n
+    widening the held half chose (the build half's records, `held` carrying build_row/build_plane/build_recovered; without them the held half alone
+    roughens the curves, S_hat falls and a bar from it would be lenient, so there is no bar: only S_hat), the two halves are drawn Binomial(n, p)/n
     (n the held half's pooled count), read at F / CELL_SIGMA and FLUX90 taken as the code takes it; S_hat = 100 x (1 - mean
     over cells of P[|FLUX90_A - FLUX90_B| / FLUX90_B > 10 %]) over `reps` draws; sigma = the standard deviation of that share
-    over a bootstrap of the map's BAR_BLOCK_ARCSEC blocks drawn until the map's cell count is reached. Returns (bar, S_hat,
+    over a bootstrap of the map's (block, repetition) units, BAR_BLOCK_ARCSEC blocks, drawn until the map's cell count is reached
+    (the realised share of one split, not the expected one, is what the measured share is). Returns (bar, S_hat,
     sigma, blocks); NaN bar where fewer than BAR_MIN_BLOCKS blocks (the map is too small to have a bar)."""
     snr = _snr_grid()
     n_x = snr.size
@@ -258,7 +260,7 @@ def flux90_halves_bar(completeness: dict, held: dict, reps: int = BAR_REPS, seed
     if has_build:
         nb = pick(tb)
         p = np.where(n + nb > 0, (pick(gh) + pick(gb)) / np.maximum(n + nb, 1), 0.0)
-    else:
+    else:                      # the held half alone roughens the truth, S_hat falls and the bar would be lenient: S_hat only
         p = np.where(n > 0, pick(gh) / np.maximum(n, 1), 0.0)
     sigma = completeness["sigma"][E].astype(np.float64)
     flux = completeness["flux"]
@@ -271,35 +273,36 @@ def flux90_halves_bar(completeness: dict, held: dict, reps: int = BAR_REPS, seed
         return flux90(np.nan_to_num(_at_flux(fx, k0, w), nan=0.0), flux)
 
     rng = np.random.default_rng(seed)
-    shares, bad, cnt = [], np.zeros(E.size), np.zeros(E.size)
+    c = completeness["centres"][E]
+    block = (np.floor(c[:, 0] / BAR_BLOCK_ARCSEC).astype(np.int64) * 100003 + np.floor(c[:, 1] / BAR_BLOCK_ARCSEC).astype(np.int64))
+    _, inv = np.unique(block, return_inverse=True)
+    n_block = int(inv.max()) + 1 if inv.size else 0
+    shares, units_cells, units_bad = [], [], []
     for _ in range(reps):
         a = f90_of(rng.binomial(n.astype(int), p), n)
         b = f90_of(rng.binomial(n.astype(int), p), n)
         ok = np.isfinite(a) & np.isfinite(b) & (n_pos >= MIN_INJECTIONS)
         with np.errstate(all="ignore"):
             rel = np.abs(a - b) / b
+        bad = ok & (rel > C1_FLUX90_AGREE)
         shares.append(100.0 * np.mean(rel[ok] <= C1_FLUX90_AGREE) if ok.any() else np.nan)
-        bad += ok & (rel > C1_FLUX90_AGREE)
-        cnt += ok
+        units_cells.append(np.bincount(inv, weights=ok, minlength=n_block))        # one unit = a block in one repetition
+        units_bad.append(np.bincount(inv, weights=bad, minlength=n_block))
     s_hat = float(np.nanmean(shares))
-    c = completeness["centres"][E]
-    block = (np.floor(c[:, 0] / BAR_BLOCK_ARCSEC).astype(np.int64) * 100003 + np.floor(c[:, 1] / BAR_BLOCK_ARCSEC).astype(np.int64))
-    _, inv = np.unique(block, return_inverse=True)
-    cells_b = np.bincount(inv, weights=cnt) / reps
-    bad_b = np.bincount(inv, weights=bad) / reps
-    keep = cells_b > 0
-    cells_b, bad_b = cells_b[keep], bad_b[keep]
-    if cells_b.size < BAR_MIN_BLOCKS:
-        return NAN, s_hat, NAN, int(cells_b.size)
-    total = cells_b.sum()
-    m = int(total / cells_b.mean() * 1.5) + 3
+    cells_u, bad_u = np.concatenate(units_cells) * stride, np.concatenate(units_bad) * stride     # a unit stands for `stride` times its cells
+    keep = cells_u >= BAR_MIN_UNIT_CELLS * stride
+    cells_u, bad_u = cells_u[keep], bad_u[keep]
+    if not has_build or n_block < BAR_MIN_BLOCKS or cells_u.size == 0:
+        return NAN, s_hat, NAN, n_block
+    total = float(np.mean([u.sum() for u in units_cells]) * stride)      # the map's cells with a FLUX90 in both halves
+    m = int(total / cells_u.mean() * 1.5) + 3
     boot = np.empty(BAR_BOOTSTRAP)
     for i in range(BAR_BOOTSTRAP):
-        j = rng.integers(0, cells_b.size, m)
-        k = min(int(np.searchsorted(np.cumsum(cells_b[j]), total)) + 1, m)
-        boot[i] = 100.0 * (1.0 - bad_b[j[:k]].sum() / cells_b[j[:k]].sum())
+        j = rng.integers(0, cells_u.size, m)
+        k = min(int(np.searchsorted(np.cumsum(cells_u[j]), total)) + 1, m)
+        boot[i] = 100.0 * (1.0 - bad_u[j[:k]].sum() / cells_u[j[:k]].sum())
     sig = float(boot.std())
-    return s_hat - 2.0 * sig, s_hat, sig, int(cells_b.size)
+    return s_hat - 2.0 * sig, s_hat, sig, n_block
 
 
 def completeness_c1(band: str, completeness: dict, held: dict) -> List[CheckRow]:
@@ -309,7 +312,7 @@ def completeness_c1(band: str, completeness: dict, held: dict) -> List[CheckRow]
     Of the (cell, flux plane) on the curve's transition (either half between 0.02 and 0.98) with at least MIN_INJECTIONS
     held-out injections behind them, the share whose difference lies within the combined 1-sigma binomial error of the two
     halves (>= 60 %), within 2 sigma (>= 93 %), within 0.03 absolute (information); and the share of cells whose FLUX90 of the
-    two halves agree within 10 %, against the bar derived from the map's own counts (`flux90_halves_bar`)."""
+    two halves agree within 10 %, against the bar derived from the map's own counts (`_flux90_halves_bar`)."""
     d = completeness
     curve_on_flux_grid = _inject_fn("curve_on_flux_grid")
     flux90 = _inject_fn("flux90")
@@ -343,13 +346,15 @@ def completeness_c1(band: str, completeness: dict, held: dict) -> List[CheckRow]
     rel = np.abs(f90 - d["flux90"]) / d["flux90"]
     if ok.any():
         share = 100.0 * float(np.mean(rel[ok] <= C1_FLUX90_AGREE))
-        bar, s_hat, sig_s, blocks = flux90_halves_bar(d, held)
+        bar, s_hat, sig_s, blocks = _flux90_halves_bar(d, held)
         if np.isfinite(bar):
             detail = ("share of cells whose FLUX90 of the two halves agree within 10 %%; bar = S_hat - 2 sigma = %.1f - 2 x %.1f "
                       "from the map's own counts (%d independent blocks)" % (s_hat, sig_s, blocks))
             rows.append(_row("C1_FLUX90_HALVES_SHARE", band, share, low=bar, detail=detail, n=int(ok.sum())))
         else:
-            rows.append(_row("C1_FLUX90_HALVES_SHARE", band, share, detail="no bar: only %d independent blocks (S_hat %.1f)" % (blocks, s_hat),
+            why = ("the held record carries no build-half records" if "build_row" not in held
+                   else "only %d independent blocks" % blocks)
+            rows.append(_row("C1_FLUX90_HALVES_SHARE", band, share, detail="no bar: %s (S_hat from the held half alone %.1f)" % (why, s_hat),
                              n=int(ok.sum()), info=True))
         rows.append(_row("C1_FLUX90_HALVES_MEDIAN", band, 100.0 * float(np.median(rel[ok])),
                          detail="median difference of FLUX90 between the halves, per cent", n=int(ok.sum()), info=True))
@@ -730,7 +735,7 @@ def _aperture_sum(img, x, y, radii_px):
 _DISC: dict = {}
 
 
-def template_in_aperture(comps, in_wcs, r_ap, step=0.4, nbox=7):
+def _template_in_aperture(comps, in_wcs, r_ap, step=0.4, nbox=7):
     """The release template, smoothed by the input pixel's box, integrated inside the aperture radius (arcsec), unit flux:
     on a fine grid of cells `step` arcsec wide with an anti-aliased edge, the box average over nbox x nbox offsets across the
     pixel (along its own, rotated axes). The PSF build holds this (the box-only table) to the release EEF; the value here is
@@ -753,7 +758,7 @@ def template_in_aperture(comps, in_wcs, r_ap, step=0.4, nbox=7):
     return _DISC[key]
 
 
-def unit_source(rep, out_wcs, band, xo, yo, half_out, phases=PHASES):
+def _unit_source(rep, out_wcs, band, xo, yo, half_out, phases=PHASES):
     """The real unit source at output pixel (xo, yo) (zero-origin), averaged over the input grid's sub-pixel `phases` (the
     PSF build's tables are the phase average; one phase of a 3.2 arcsec input grid sampling an 11 arcsec beam scatters by
     +-0.2 % in an aperture sum): returns (A_real, A_template, block, x0, y0), the block (2 half_out + 1)^2 of the resampled
@@ -793,7 +798,7 @@ def unit_source(rep, out_wcs, band, xo, yo, half_out, phases=PHASES):
             raise ValueError("the synthetic input does not cover the block")
         block = block + blk["image"] / len(phases)
     a_real = _aperture_sum(block, xo - x0, yo - y0, (r_ap / pix_out, r_in / pix_out, r_out / pix_out))
-    return a_real, template_in_aperture(comps, in_wcs, r_ap), block, x0, y0
+    return a_real, _template_in_aperture(comps, in_wcs, r_ap), block, x0, y0
 
 
 def _expected_enclosed(config, m, x, y, mix):
@@ -808,7 +813,7 @@ def _expected_enclosed(config, m, x, y, mix):
     worst = 0.0
     for i in range(len(x)):
         for k in np.flatnonzero(mix[i] > 0):
-            a_real, a_direct, *_ = unit_source(reps[k], _out_wcs(m), m.band, x[i], y[i], half_out)
+            a_real, a_direct, *_ = _unit_source(reps[k], _out_wcs(m), m.band, x[i], y[i], half_out)
             out[i] += mix[i, k] * eef[k] * a_real / a_direct
             worst = max(worst, abs(a_direct / eef[k] - 1))
     return out, worst
@@ -848,12 +853,12 @@ def _check_positions(m, meta, rep_entry, margin):
 
 
 def _real_sources(rep, out_wcs, band, positions, half_out, h):
-    """`unit_source` at each of one sub-group's check positions: (A_real, A_real averaged over SOURCE_PHASES, A_direct, the
+    """`_unit_source` at each of one sub-group's check positions: (A_real, A_real averaged over SOURCE_PHASES, A_direct, the
     (2h+1)^2 patch around the source's nearest pixel) per position (a worker's unit of `normalisation_check`)."""
     out = []
     for x, y, _kind in positions:
-        a_real, a_direct, block, _bx, _by = unit_source(rep, out_wcs, band, x, y, half_out)
-        a_mean = float(np.mean([unit_source(rep, out_wcs, band, x + fx, y + fy, half_out)[0] for fx, fy in SOURCE_PHASES]))
+        a_real, a_direct, block, _bx, _by = _unit_source(rep, out_wcs, band, x, y, half_out)
+        a_mean = float(np.mean([_unit_source(rep, out_wcs, band, x + fx, y + fy, half_out)[0] for fx, fy in SOURCE_PHASES]))
         out.append((a_real, a_mean, a_direct, block[half_out - h:half_out + h + 1, half_out - h:half_out + h + 1]))
     return out
 
