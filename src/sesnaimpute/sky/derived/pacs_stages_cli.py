@@ -33,8 +33,7 @@ import sys
 
 from sesnaimpute import config as config_module
 from sesnaimpute.sky.derived import pacs_sizing
-
-BANDS = ("P70", "P100", "P160")
+from sesnaimpute.definitions import PACS_BANDS as BANDS
 STAGES = ("preflight", "detect", "inject", "inject-band", "pool-tables", "pool", "pool-band", "assemble", "finish", "run", "plan",
           "claim-finish")
 NEEDS_BAND = ("detect", "inject", "inject-band", "pool-tables", "pool", "pool-band", "assemble", "plan")

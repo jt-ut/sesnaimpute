@@ -54,6 +54,7 @@ from numba import njit
 from scipy.ndimage import map_coordinates
 
 from sesnaimpute.sky.download.herschel_pacs.index import MapRecord
+from sesnaimpute.definitions import PACS_APERTURES as APERTURES
 
 # The PACS team's release (Calzoletti, ESAC, 16 May 2017, HERSCHEL-HSC-DOC-2181
 # "PACS Photometer PSFs and EEFs as Ancillary Data Products: Release note"),
@@ -63,7 +64,7 @@ from sesnaimpute.sky.download.herschel_pacs.index import MapRecord
 # -42), non-recentered, projected with pixfrac 0.1 (the Standard Pipeline value,
 # which the maps carry as PIXFRAC). Calibration context: Balog et al. 2014,
 # Exp. Astron. 37, 129. Files in PSF_Data/ and EEF_Data/ under
-RELEASE_URL = "https://archives.esac.esa.int/hsa/legacy/ADP/PSF/PACS/PACS-P/"
+# https://archives.esac.esa.int/hsa/legacy/ADP/PSF/PACS/PACS-P/
 
 # (band, mode, speed arcsec/s) -> the release's speed tag and EEF file, and the
 # beam FWHM (geometric mean of the two fitted axes, arcsec) that sets the blend
@@ -137,12 +138,7 @@ def psf_directory(config):
     return Path(config.inputs["herschel_pacs_maps"]) / "calibration" / "psf"
 
 
-# The eHOPS apertures (Pokhrel et al. 2023, ApJS 266, 32, Table 1; owner ruling 2026-10-27, spec section 12):
-# aperture radius, sky annulus inner and outer radius (arcsec). EHOPS_CORRECTION are eHOPS's own aperture
-# corrections, on the release's within-60-arcsec normalisation and one per band; the products do NOT use them
-# (they divide by aperture_fraction, the exact total-flux fraction per mode) -- kept for comparisons only.
-APERTURES = {"P70": (9.6, 12.8, 25.6), "P100": (8.0, 9.6, 16.0), "P160": (12.8, 16.0, 22.4)}
-EHOPS_CORRECTION = {"P70": 0.798, "P100": 0.729, "P160": 0.735}
+# The eHOPS apertures: definitions.PACS_APERTURES (imported above as APERTURES).
 
 
 def _eef_columns(eef_path):

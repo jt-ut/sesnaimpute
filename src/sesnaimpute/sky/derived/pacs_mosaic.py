@@ -46,6 +46,7 @@ from numpy.lib.format import open_memmap
 
 from sesnaimpute.sky.derived import pacs_psf
 from sesnaimpute.sky.download.herschel_pacs.index import map_rank, maps_root, read_index
+from sesnaimpute.definitions import PACS_PIXEL_ARCSEC as PIXEL_ARCSEC
 
 warnings.filterwarnings("ignore", message=".*datfix.*")
 
@@ -55,8 +56,7 @@ WINDOW_ARCSEC = 60.0
 STRIP_ROWS = 64
 #: Least common valid output pixels for a pair of maps to enter the zero-level solve.
 MIN_COMMON_PIXELS = 2000
-#: The band's finest input pixel (arcsec).
-PIXEL_ARCSEC = {"P70": 1.6, "P100": 1.6, "P160": 3.2}
+#: The band's finest input pixel (arcsec): definitions.PACS_PIXEL_ARCSEC, imported above as PIXEL_ARCSEC.
 
 LAYERS = {
     "image": ("Jy per output pixel", "The mosaic's flux in each pixel, the weighted mean of the input maps resampled onto this grid. "

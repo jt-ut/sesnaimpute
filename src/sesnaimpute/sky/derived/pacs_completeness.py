@@ -73,18 +73,23 @@ from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.config import product_path
 from sesnaimpute.sky.derived import pacs_fit
-from sesnaimpute.sky.derived.pacs_photometry import (BLEND_RADIUS_BEAMS, SNR_BIN_CENTRES, SNR_BIN_EDGES,
-                                                     calibrated_sigma)
+from sesnaimpute.sky.derived.pacs_photometry import calibrated_sigma
 from sesnaimpute.sky.derived import pacs_psf
-from sesnaimpute.sky.derived.pacs_psf import APERTURES
-
-BANDS = ("P70", "P100", "P160")
+from sesnaimpute.definitions import COMPLETENESS_STORAGE_SCALE as STORAGE_SCALE
+from sesnaimpute.definitions import PACS_APERTURES as APERTURES
+from sesnaimpute.definitions import PACS_BANDS as BANDS
+from sesnaimpute.definitions import PACS_BLEND_RADIUS_BEAMS as BLEND_RADIUS_BEAMS
+from sesnaimpute.definitions import PACS_BLOCK_CELLS as BLOCK_CELLS
+from sesnaimpute.definitions import PACS_MAX_EXTRA_BATCHES as MAX_EXTRA_BATCHES
+from sesnaimpute.definitions import PACS_MIN_INJECTIONS as MIN_INJECTIONS
+from sesnaimpute.definitions import PACS_POOL_ARCSEC as POOL_ARCSEC
+from sesnaimpute.definitions import PACS_POOL_WIDENINGS as POOL_WIDENINGS
+from sesnaimpute.definitions import PACS_SNR_BIN_CENTRES as SNR_BIN_CENTRES
+from sesnaimpute.definitions import PACS_SNR_BIN_EDGES as SNR_BIN_EDGES
 #: positions per cell (spec section 5)
 N_POS = 200
 #: a cell needs this many valid positions to get a curve; fewer means the cell is not covered
 MIN_VALID_POSITIONS = 100
-#: the stored curve is the fraction times this (the SESNA convention)
-STORAGE_SCALE = 600
 #: PACS has no Vega system: zero point 1 Jy, m = -2.5 log10(F / 1 Jy)
 ZERO_POINT_JY = 1.0
 #: ONE grid per band for the whole survey, bright to faint (6 mJy is below the 5-sigma flux of the deepest
@@ -92,9 +97,6 @@ ZERO_POINT_JY = 1.0
 MAG_MIN = -3.5
 MAG_MAX = 5.5
 MAG_STEP = 0.25
-#: a piece of the cell statistics is one tile's square block of BLOCK_CELLS x BLOCK_CELLS cells (plus a
-#: one-cell border whose fits feed the 3 x 3 noise median of the block's edge cells)
-BLOCK_CELLS = 16
 MAD_TO_SIGMA = 1.4826
 #: the map's reference noise (the fallback for a cell with no clean neighbour) is the median over up to this
 #: many evenly spread cells of the tile
@@ -110,15 +112,9 @@ SEPARATION_AREAS = 2.0
 SNR_LOG_MIN = -0.5
 SNR_LOG_MAX = 3.0
 SNR_LOG_STEP = 0.1
-#: a cell's counts at an S/N plane are pooled over the cells of its map whose centres lie within this radius of
-#: its own; where the pooled count is still short of MIN_INJECTIONS the radius is widened to 2 x, then 3 x
-POOL_ARCSEC = 120.0
-POOL_WIDENINGS = (1, 2, 3)
-MIN_INJECTIONS = 100
 #: the first round of batches per plane and half aims at this multiple of MIN_INJECTIONS in the pooled
 #: interior; further batches, restricted to the cells whose pooled count is short, follow until none is
 INTERIOR_SAFETY = 1.3
-MAX_EXTRA_BATCHES = 40
 #: the recovered fraction FLUX90 is read at
 FLUX90_FRACTION = 0.9
 
@@ -474,12 +470,9 @@ def flux90(fraction, flux_grid, level=FLUX90_FRACTION):
 ZERO_SUM_FOOTPRINT = 0.01
 #: the matching radius is MATCH_SIGMAS x the rms offset of a detected position: the injections at CALIBRATION_SNR in
 #: quadrature with the alignment scatter of the map's registration pairs (`pacs_fit.registration_pairs`), the map's own
-#: where it has at least MIN_ALIGN_PAIRS pairs, else the band's pooled
+#: where it has enough pairs, else the band's pooled
 MATCH_SIGMAS = 3.0
 CALIBRATION_SNR = (30.0, 100.0)
-MIN_ALIGN_PAIRS = 10
-#: the local SESNA density behind CHANCE is counted within this radius of each PACS source
-LOCAL_DENSITY_ARCSEC = 60.0
 
 
 def filtered(tile, x, y, offset_cell, image=None, row0=0):
@@ -1442,11 +1435,6 @@ def _assemble_tile(inp, held, stats, blocks, flux_grid):
 def _tile_geometry(record):
     wcs = WCS(fits.Header.fromstring(record.wcs_header)).celestial
     return pacs_fit.MapGrid.from_wcs(wcs, record.shape), wcs
-
-
-#: the cells kept per map: every cell inside the region's source bounding box padded by one nside-512
-#: pixel (planner 2026-10-27: catalog.completeness maps the admitted pixels' sample points to cells itself)
-REGION_PAD_ARCSEC = 412.0
 
 
 def _assemble_peaks(found, records, geometry, shifts, keys, cell_sigma, cell_bin, ra, dec):

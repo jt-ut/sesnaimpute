@@ -203,3 +203,45 @@ GRANULE_DEFINITIONS = {
     "region": "one of the 29 named star-forming regions",
     "survey": "the whole survey, one value for everything",
 }
+
+
+# --- (d) The PACS build ---
+#
+# The far-infrared stages (sky.derived.pacs_* and the package sky.derived.pacs) define these once; every PACS module
+# imports them from here (consolidation round 1, 2026-10-31: they were defined two to four times).
+
+#: the three PACS bands, in wavelength order (the PACS keys of BANDS above)
+PACS_BANDS = ("P70", "P100", "P160")
+#: the mosaic's output pixel per band, arcsec: the band's finest input pixel (PacsPhoto L2.5 maps: 1.6 arcsec in the
+#: blue channel, 3.2 arcsec in the red)
+PACS_PIXEL_ARCSEC = {"P70": 1.6, "P100": 1.6, "P160": 3.2}
+#: the eHOPS apertures (Pokhrel et al. 2023, ApJS 266, 32, Table 1; owner ruling 2026-10-27, spec section 12):
+#: aperture radius, sky annulus inner and outer radius (arcsec)
+PACS_APERTURES = {"P70": (9.6, 12.8, 25.6), "P100": (8.0, 9.6, 16.0), "P160": (12.8, 16.0, 22.4)}
+#: completeness cell side, arcsec (owner 2026-10-24: SESNA's own)
+PACS_CELL_ARCSEC = 30.0
+#: a cell's counts at an S/N plane are pooled over the cells of its map whose centres lie within POOL_ARCSEC of its
+#: own; where the pooled count is still short of MIN_INJECTIONS the radius is widened to 2 x, then 3 x
+PACS_POOL_ARCSEC = 120.0
+PACS_POOL_WIDENINGS = (1, 2, 3)
+PACS_MIN_INJECTIONS = 100
+#: rounds of extra injection batches after the first, at most (the round rule of the injection stage)
+PACS_MAX_EXTRA_BATCHES = 40
+#: bins of injected S/N (F / CELL_SIGMA) in which the completeness stage's C2 checks the measured error: < 8, 8-30,
+#: 30-120, >= 120; and a representative S/N of each bin
+PACS_SNR_BIN_EDGES = (8.0, 30.0, 120.0)
+PACS_SNR_BIN_CENTRES = (5.7, 15.5, 60.0, 240.0)
+#: a source within this many beam FWHM of another source's detection is an unseparable blend (ORIGIN 3) unless it is
+#: the brighter member: the far-infrared survey convention (HOPS/eHOPS flag close pairs the same way; planner ruling,
+#: owner-approved 2026-10-28)
+PACS_BLEND_RADIUS_BEAMS = 1.0
+#: a piece of the cell statistics is one map's square block of BLOCK_CELLS x BLOCK_CELLS cells (plus a one-cell border
+#: whose fits feed the 3 x 3 noise median of the block's edge cells)
+PACS_BLOCK_CELLS = 16
+
+# --- (e) Completeness storage ---
+#
+#: a stored completeness fraction is the fraction times this, rounded to uint16 (the SESNA convention; ~100 injected
+#: sources per pixel and bin, some pixels averaging six 100-trial estimates, so a fraction is exact to 1/600). Shared by
+#: catalog.completeness and the PACS completeness product.
+COMPLETENESS_STORAGE_SCALE = 600
