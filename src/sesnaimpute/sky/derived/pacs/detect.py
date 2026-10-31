@@ -39,9 +39,6 @@ from sesnaimpute.definitions import PACS_APERTURES as APERTURES
 from sesnaimpute.sky.derived.pacs import grid, mosaic
 from sesnaimpute.sky.derived.pacs.grid import TILE, CellGrid, TiledLayer
 from sesnaimpute.sky.derived.pacs.mosaic import Mosaic, Window
-# R3: swap -- the old build's prepared mosaic stands in for mosaic.Mosaic while mosaic.py is a skeleton (`_PreparedMosaic`)
-from sesnaimpute.sky.derived import pacs_fit as _old_fit
-from sesnaimpute.sky.derived import pacs_mosaic as _old_mosaic
 
 #: the detection layers, their dtype and fill
 DETECTION_LAYERS = {"m": (np.float32, np.nan), "ratio": (np.float32, np.nan), "norm": (np.float32, np.nan),
@@ -972,8 +969,11 @@ def detect_band(config, region: str, band: str, box: Optional[Sequence[float]], 
     its returned dict bit-identical (map index 0), the m-derived ones (m_sigma, m_offset, peak positions, pos_k) to the
     m layer's 1e-6."""
     n_jobs = int(n_jobs or getattr(config, "n_jobs", 1) or 1)
-    m = _open_mosaic(config, region, band, box)
-    if m is None or m.cells.n_cells == 0:
+    try:
+        m = mosaic.open_mosaic(config, region, band, box)
+    except FileNotFoundError:
+        return None
+    if m.cells.n_cells == 0:
         return None
     ra = np.asarray(ra, np.float64)
     dec = np.asarray(dec, np.float64)
@@ -1004,106 +1004,3 @@ def detect_band(config, region: str, band: str, box: Optional[Sequence[float]], 
     return BandDetection(cells=cells, cell_grid=m.cells, shift=(float(shift[0]), float(shift[1]), int(shift[2])),
                          src_row=src_row, cell_bin=cell_bin, peaks=peaks, pos_k_arcsec=pos_k, r_match=r_match,
                          kernel=_kernel_of(detection), n_src=int(ra.size))
-
-
-# ----------------------------------------------------------------------------------------------------------------------
-# R3: swap -- the old build's prepared mosaic as a `mosaic.Mosaic` (the gate's stand-in while mosaic.py is a skeleton)
-
-def _open_mosaic(config, region, band, box):
-    """The band's mosaic: the old store (mosaic.hdf5 + prepared layers) through `_PreparedMosaic` where it exists
-    (R3: swap), else `mosaic.open_mosaic`; None when the band has neither."""
-    old = _old_mosaic.product_dir(config, region, band, box)
-    if os.path.exists(os.path.join(old, "mosaic.hdf5")):
-        return _PreparedMosaic.get(config, region, band, box)
-    try:
-        return mosaic.open_mosaic(config, region, band, box)
-    except FileNotFoundError:
-        return None
-
-
-_PREPARED: dict = {}
-
-
-class _PreparedMosaic:
-    """`mosaic.Mosaic`'s reader and measurements over the old prepared layers (`pacs_fit.Tile`), the subset detect.py
-    calls: grid, cells, psf, band, pixel_arcsec, window, tile_window, present_tiles, xy, beam_at, beam_px_at,
-    injection_half_width, aperture, neighbours, near_bright, pixel_sigma. Picklable by (config, region, band, box),
-    one instance per process. R3: swap."""
-
-    @classmethod
-    def get(cls, config, region, band, box):
-        key = (os.path.realpath(config.data_root), region, band, None if box is None else tuple(box))
-        if key not in _PREPARED:
-            _PREPARED.clear()
-            _PREPARED[key] = cls(config, region, band, box)
-        return _PREPARED[key]
-
-    def __init__(self, config, region, band, box):
-        self._key = (config, region, band, box)
-        record = _old_fit.mosaic_record(config, region, band, box)
-        if not os.path.exists(os.path.join(_old_fit.prepared_dir(config, record), "tile.pkl")):
-            _old_fit.prepare_map(config, record)
-        self.tile = _old_fit.cached_tile(config, record)
-        self.record = record
-        self.band = band
-        self.grid = grid.PixelGrid.from_header(record.wcs_header, record.shape)
-        self.cells = CellGrid.from_wcs(self.grid.wcs, record.shape)
-        self.psf = self.tile._psf
-        self.pixel_arcsec = self.tile.pixel_arcsec
-        self._present = None
-
-    def __reduce__(self):
-        return (_PreparedMosaic.get, self._key)
-
-    def window(self, y0, y1, x0, x1):
-        ny, nx = self.grid.shape
-        img = np.full((y1 - y0, x1 - x0), np.nan, np.float32)
-        err = np.full((y1 - y0, x1 - x0), np.nan, np.float32)
-        ya, yb, xa, xb = max(y0, 0), min(y1, ny), max(x0, 0), min(x1, nx)
-        if yb > ya and xb > xa:
-            img[ya - y0:yb - y0, xa - x0:xb - x0] = self.tile.image[ya:yb, xa:xb]
-            err[ya - y0:yb - y0, xa - x0:xb - x0] = self.tile.error[ya:yb, xa:xb]
-        return Window(y0, x0, img, err)
-
-    def tile_window(self, iy, ix, halo):
-        return self.window(iy * TILE - halo, (iy + 1) * TILE + halo, ix * TILE - halo, (ix + 1) * TILE + halo)
-
-    def present_tiles(self):
-        if self._present is None:
-            ty, tx = self.grid.tile_shape()
-            out = []
-            for iy in range(ty):
-                strip = np.asarray(self.tile.image[iy * TILE:(iy + 1) * TILE])
-                for ix in range(tx):
-                    if np.isfinite(strip[:, ix * TILE:(ix + 1) * TILE]).any():
-                        out.append((iy, ix))
-            self._present = out
-        return list(self._present)
-
-    def xy(self, ra_deg, dec_deg):
-        return grid.sky_to_pixel(self.grid.wcs, ra_deg, dec_deg)
-
-    def beam_at(self, x, y):
-        return self.tile.beam_at(x, y)
-
-    def beam_px_at(self, x, y):
-        return self.tile.beam_px_at(x, y)
-
-    def injection_half_width(self):
-        return self.tile.injection_half_width()
-
-    def aperture(self, x, y, window=None, chunk=2048):
-        if window is None:
-            return self.tile.aperture(x, y, chunk=chunk)
-        if window.x0 != 0 or window.image.shape[1] != self.grid.nx:
-            raise ValueError("the prepared stand-in measures on full-width row windows only")
-        return self.tile.aperture(x, y, chunk=chunk, image=window.image, row0=window.y0)
-
-    def neighbours(self):
-        return self.tile.neighbours
-
-    def near_bright(self, x, y):
-        return self.tile.near_bright(x, y)
-
-    def pixel_sigma(self, x, y):
-        return self.tile.pixel_sigma(x, y)

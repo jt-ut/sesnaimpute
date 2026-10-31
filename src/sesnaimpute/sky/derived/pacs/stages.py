@@ -19,8 +19,8 @@ Stages, per region (per band where marked):
     pool    (band, shard of K)  inject.pool_tasks[shard::K] -> inject.pool_block
                                                                                 -> <band>/pool_s<k>of<K>.hdf5
             and, by whichever invocation finds all K shards done, the band's assembly -> <band>/band.hdf5
-    finish          photometry.merge_sources, forced_photometry, cross_match; products.write_*; the CHECKS rows (psf
-                    rows, the real-map rows of the injection records, checks.chance_check, checks.region_checks) into
+    finish          photometry.merge_sources, forced_photometry, cross_match; products.write_*; the CHECKS rows (the
+                    psf stage's rows and checks.region_checks: C1, C2, detections, real map, C4/C5, HPPSC, chance) into
                     the completeness product; then, ONLY once the three products verify against their receipts, the
                     band work directories (records, detection layers) are removed.
 
@@ -74,7 +74,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.catalog import curated
 from sesnaimpute.definitions import PACS_BANDS as BANDS
 from sesnaimpute.definitions import PACS_MAX_EXTRA_BATCHES as MAX_EXTRA_BATCHES
-from sesnaimpute.sky.derived.pacs import checks, detect, grid, inject, mosaic, photometry, products, psf
+from sesnaimpute.sky.derived.pacs import checks, convert, detect, grid, inject, mosaic, photometry, products, psf
 from sesnaimpute.sky.download.herschel_pacs.index import read_index
 
 #: the stages, in order
@@ -87,8 +87,10 @@ SHARDED = ("inject", "pool")
 VERBS = STAGES + ("all", "run", "table")
 #: a record file's receipt is `<record>` + this
 RECEIPT_SUFFIX = ".receipt.json"
-#: the pooling rule of the build (None = `inject.PoolingRule.legacy()`, main 0683690's; round 3 sets the ruled one)
-POOLING_RULE = None
+#: the pooling rule of the build: the owner's ruling (2026-10-31), `inject.PoolingRule.production()` (window x1.5 in
+#: CELL_SIGMA, widen then the all-cell pool, never NaN; two curves per coverage-edge cell by |ln r|). The identity gate
+#: alone sets `inject.PoolingRule.legacy()` here, in its own process.
+POOLING_RULE = inject.PoolingRule.production()
 #: the shard number of a band's assembly row (stage pool)
 ASSEMBLY = -1
 
@@ -106,7 +108,8 @@ class Receipt:
 class StageRow:
     """One row of the stage table: stage, band ("" for region-wide), round (-1 if none), shard (-1 if none; stage
     "pool" with shard -1 = the band's assembly), of (K), path, done (finished and every output matches its receipt),
-    problem ("" or what is wrong: not run, started not finished, missing, no receipt, empty, size, checksum)."""
+    problem ("" or what is wrong: not run, started not finished, missing, no receipt, empty, size, checksum), and from
+    the row file: started, finished (times), code (the checkout's commit), host."""
     stage: str
     band: str
     round: int
@@ -115,6 +118,10 @@ class StageRow:
     path: str
     done: bool
     problem: str
+    started: str = ""
+    finished: str = ""
+    code: str = ""
+    host: str = ""
 
 
 class StageError(RuntimeError):
@@ -304,11 +311,19 @@ def _verify_file(path: str, receipt: dict) -> str:
     return ""
 
 
+#: what a mosaic directory may still hold of the retired dense layout (kept until `convert --delete-dense`): not part of
+#: the store, so not in its receipt
+_DENSE_LEGACY = re.compile(r"^(mosaic\.hdf5|[a-z]+\.npy(\.zst)?|_smooth|_psf|\.convert_tmp|\.converting)$")
+
+
 def _manifest(d: str) -> dict:
     """The receipt of a directory: every file's (relative path, size, sha256), their total size, one sha256 over the
-    list (temporary files excluded)."""
+    list (temporary files and the dense layout's leftovers at the top level excluded)."""
     files = []
     for root, dirs, names in os.walk(d):
+        if root == d:
+            dirs[:] = [x for x in dirs if not _DENSE_LEGACY.match(x)]
+            names = [x for x in names if not _DENSE_LEGACY.match(x)]
         dirs.sort()
         rel_root = os.path.relpath(root, d)
         for n in sorted(names):
@@ -546,6 +561,9 @@ def _row_state(config, region, box, key: _Key) -> StageRow:
         return mk(primary, False, "not run")
     row = _read_json(path)
     key = _Key(row["stage"], row["band"], row["round"], row["shard"], row["of"])      # the assembly's K is the file's
+    info = dict(started=row.get("started") or "", finished=row.get("finished") or "", code=row.get("code") or "",
+                host=row.get("host") or "")
+    mk = lambda p, done, problem: StageRow(key.stage, key.band, key.round, key.shard, key.of, p, done, problem, **info)
     if not row.get("finished"):
         return mk(row["path"], False, "started %s on %s (pid %s), not finished" % (row["started"], row["host"], row["pid"]))
     for out in row["outputs"]:
@@ -609,11 +627,13 @@ def stage_table(config, region: str, box: Optional[Sequence[float]] = None) -> L
 
 def format_table(rows: Sequence[StageRow]) -> str:
     """The stage table as text (one line per row)."""
-    out = ["%-7s %-5s %5s %9s  %-4s  %s" % ("stage", "band", "round", "shard/K", "done", "problem or path")]
+    out = ["%-7s %-5s %5s %9s  %-4s  %-19s %-19s %-12s %-14s %s" % ("stage", "band", "round", "shard/K", "done", "started",
+                                                                     "finished", "code", "host", "problem or path")]
     for r in rows:
         shard = "assembly" if (r.stage == "pool" and r.shard == ASSEMBLY) else ("%d/%d" % (r.shard, r.of) if r.shard >= 0 else "")
-        out.append("%-7s %-5s %5s %9s  %-4s  %s" % (r.stage, r.band or "-", r.round if r.round >= 0 else "", shard,
-                                                   "yes" if r.done else "no", r.problem or r.path))
+        out.append("%-7s %-5s %5s %9s  %-4s  %-19s %-19s %-12s %-14s %s" % (
+            r.stage, r.band or "-", r.round if r.round >= 0 else "", shard, "yes" if r.done else "no", r.started or "-",
+            r.finished or "-", (r.code or "-")[:12], (r.host or "-")[:14], r.problem or r.path))
     return "\n".join(out)
 
 
@@ -708,18 +728,7 @@ def _injections_complete(config, region, box, band) -> int:
 
 
 def _pooling_rule():
-    return inject.PoolingRule.legacy() if POOLING_RULE is None else POOLING_RULE
-
-
-def _held_and_stats(det, band_dir: str) -> Tuple[dict, dict]:
-    """The held-out half's injections and the band's statistics from its injection records (what the old
-    `_write_pool_table` returned beside the table). R3: contract addition -- the record order, the half split and the
-    statistics are inject's, so inject.py must provide `held_and_stats(detection, records_dir)`; until then this
-    raises."""
-    fn = getattr(inject, "held_and_stats", None)
-    if fn is None:
-        raise NotImplementedError("R3: inject.held_and_stats(detection, records_dir) is not in the contract yet")
-    return fn(det, band_dir)
+    return POOLING_RULE
 
 
 def _band_completeness(config, region, band, box):
@@ -746,12 +755,20 @@ def _stage_mosaic(config, region, box, key, n_jobs, **_):
     note = ""
     if _mosaic_complete(d):
         note = "the existing mosaic store adopted"
+    elif os.path.exists(os.path.join(d, "mosaic.hdf5")):
+        # a stored mosaic of the retired dense layout: converted to the tile store, every pixel, smoothed-error sample
+        # and PSF table verified bit-equal; the dense files are kept (convert --delete-dense removes them)
+        convert.convert_directory(d)
+        note = "the stored dense mosaic converted to tiles and verified"
     else:
-        if os.path.exists(d):
-            shutil.rmtree(d)            # a build killed before its index files is not a product
+        for name in mosaic.LAYERS + ("smooth", "psf"):          # a build killed before its index files is no product
+            if os.path.exists(os.path.join(d, name)):
+                shutil.rmtree(os.path.join(d, name))
         mosaic.build_mosaic(config, region, key.band, box=box, n_jobs=n_jobs)
-        if not _mosaic_complete(d):
-            raise StageError("%s: build_mosaic returned without the four layers' index.json and psf/psf.json" % d)
+        note = "built from the input maps"
+    if not _mosaic_complete(d):
+        raise StageError("%s: the mosaic store lacks the four layers' index.json or psf/psf.json" % d)
+    mosaic.open_mosaic(config, region, key.band, box).neighbours()   # stored in META once (a converted store lacks it)
     return [dict(kind="dir", path=d, receipt=_manifest(d))], note
 
 
@@ -760,7 +777,8 @@ def _stage_psf(config, region, box, key, n_jobs, **_):
     if _band_empty(config, region, box, key.band):
         return [], "the region has no map of the band"
     m = mosaic.open_mosaic(config, region, key.band, box)
-    rows = list(checks.zero_image_check(config, m)) + list(checks.normalisation_check(config, m, n_jobs))
+    rows = (list(checks.input_checks(config, region, key.band)) + list(checks.zero_image_check(config, m))
+            + list(checks.normalisation_check(config, m, n_jobs)))
     for r in rows:
         print("check %-24s %-4s %12.6g  bar [%g, %g]  %s  %s" % (r.name, r.band, r.value, r.bar_low, r.bar_high,
                                                                  r.verdict, r.detail), flush=True)
@@ -792,20 +810,22 @@ def _stage_detect(config, region, box, key, n_jobs, **_):
     return outputs, ""
 
 
-def _concat_records(parts: Sequence[dict]) -> Tuple[Dict[str, np.ndarray], list, float]:
-    """The pieces' outputs as one table: every array column concatenated in piece order (scalars as one-element
-    columns); CHECKS rows (`checks`) collected; `seconds` summed."""
+def _concat_records(parts: Sequence[dict]) -> Dict[str, np.ndarray]:
+    """The pieces' outputs (`inject.inject_task`) as one record table: every column concatenated in piece order; the
+    seconds summed; n_detected (the band's, the same in every piece) once."""
     columns: Dict[str, list] = {}
-    rows, seconds = [], 0.0
     for p in parts:
         for k, v in p.items():
-            if k == "seconds":
-                seconds += float(sum(v.values())) if isinstance(v, dict) else float(np.sum(v))
-            elif k == "checks":
-                rows.extend(v or [])
-            else:
-                columns.setdefault(k, []).append(np.atleast_1d(np.asarray(v)))
-    return {k: np.concatenate(v) for k, v in columns.items()}, rows, seconds
+            columns.setdefault(k, []).append(np.atleast_1d(np.asarray(v)))
+    out = {}
+    for k, v in columns.items():
+        if k.startswith("seconds_"):
+            out[k] = np.float64(np.sum(np.concatenate(v)))
+        elif k == "n_detected":
+            out[k] = np.int64(v[0][0])
+        else:
+            out[k] = np.concatenate(v)
+    return out
 
 
 def _stage_inject(config, region, box, key, n_jobs, tasks=None, **_):
@@ -814,16 +834,15 @@ def _stage_inject(config, region, box, key, n_jobs, tasks=None, **_):
     mine = tasks[key.shard::key.of]
     done = pieces_module.run(functools.partial(inject.inject_task, config, m, det), mine, n_jobs,
                              unit="injection pieces (round %d, shard %d of %d)" % (key.round, key.shard, key.of))
-    table, rows, seconds = _concat_records(done)
-    counts = np.asarray(inject.record_counts(table, int(np.asarray(det.cells.ids).size)))
+    tables = _concat_records(done) if done else {}
+    counts = np.asarray(inject.record_counts(tables, int(np.asarray(det.cells.ids).size)) if tables else
+                        np.zeros((int(np.asarray(det.cells.ids).size), 2 * inject.N_PLANES), np.int64))
     row, pair = np.nonzero(counts)
-    tables = {"records/" + k: v for k, v in table.items()}
     tables.update({"counts/row": row.astype(np.int64), "counts/pair": pair.astype(np.int64),
                    "counts/n": counts[row, pair].astype(np.int64)})
-    tables.update(_check_tables(rows))
     path = _primary_path(config, region, box, key)
     write_record(path, tables, dict(stage="inject", band=key.band, round=key.round, shard=key.shard, K=key.of,
-                                    n_tasks=len(mine), seconds=seconds, count_shape=list(counts.shape)))
+                                    n_tasks=len(mine), count_shape=list(counts.shape)))
     return [dict(kind="record", path=path)], "%d of the round's %d pieces" % (len(mine), len(tasks))
 
 
@@ -864,7 +883,7 @@ def _stage_assembly(config, region, box, key, n_jobs, **_):
             raise StageError("%s %s: pooling shard %d of %d holds %d blocks, not %d" % (region, key.band, s, K, len(blocks), len(idx)))
         for i, b in zip(idx, blocks):
             pooled[i] = b
-    held, stats = _held_and_stats(det, work_dir(config, region, box, key.band))
+    held, stats = inject.held_and_stats(det, work_dir(config, region, box, key.band))
     bc = inject.assemble_band(det, pooled, held, stats, fgrid)
     _write_object(path, dataclasses.replace(bc, detection=None),            # the detection lives in detect.hdf5
                   dict(stage="assembly", band=key.band, K=K, empty=False, rule=repr(_pooling_rule())))
@@ -913,10 +932,6 @@ def _stage_finish(config, region, box, key, n_jobs, reference_product=None, **_)
         d = work_dir(config, region, box, b)
         if os.path.exists(os.path.join(d, "psf_checks.hdf5")):
             rows += _check_rows(read_record(os.path.join(d, "psf_checks.hdf5")))
-        for name in sorted(os.listdir(d)) if os.path.isdir(d) else ():
-            if re.fullmatch(r"inject_r\d+_s\d+of\d+\.hdf5", name):
-                rows += _check_rows(read_record(os.path.join(d, name)))
-    rows += list(checks.chance_check(counts))
     rows += list(checks.region_checks(config, region, bands, box, reference_product))
 
     def with_checks(tmp):
@@ -1012,11 +1027,12 @@ def _assemble_if_ready(config, region, box, band, K, n_jobs) -> Optional[StageRo
 
 
 def run_stage(config, stage: str, region: str, band: Optional[str] = None, box: Optional[Sequence[float]] = None,
-              round_: Optional[int] = None, shard: int = 0, of: int = 1, n_jobs: Optional[int] = None) -> StageRow:
+              round_: Optional[int] = None, shard: int = 0, of: int = 1, n_jobs: Optional[int] = None,
+              reference_product: Optional[str] = None) -> StageRow:
     """Runs one stage (one shard) unless its stage row is done; returns its row. Seeds and records do not depend on
     (shard, of, n_jobs) (FROZEN 2-3). A pool shard assembles the band once all K shards are done; finish clears the
     band work directories once its products verify. An injection round without tasks writes nothing (row done)."""
-    return _run(config, stage, region, band, box, round_, shard, of, n_jobs)
+    return _run(config, stage, region, band, box, round_, shard, of, n_jobs, reference_product)
 
 
 def run_region(config, region: str, box: Optional[Sequence[float]] = None, n_jobs: Optional[int] = None,

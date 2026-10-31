@@ -41,7 +41,7 @@ Store (transient, the band's work directory `records_dir`): injection records `i
 shard: row int32, plane int8, half int8, batch int32, block int32, near bool, recovered bool, dflux float32, flux float32,
 det_flux float32, det_dist float32, lnr float32; the designated round-0 piece of each block also carries the per-cell
 coverage table cell_row, cell_cov_mean, cell_cov_max, cell_cov_min; scalars seconds_inject, seconds_aperture,
-n_detected, check), written by the caller (stages.write_record; here `_write_record` until round 3); the band's record
+n_detected, check), written by the caller (stages.write_record, one root dataset per column); the band's record
 table `table.hdf5` (both halves sorted by row with per-row offsets, far-injection counts per (row, plane), the per-row
 coverage, the held-out half and the statistics; `build_table`) that the pooling blocks read; no pickles.
 """
@@ -49,7 +49,6 @@ coverage, the held-out half and the statistics; `build_table`) that the pooling 
 from __future__ import annotations
 
 import glob
-import hashlib
 import json
 import os
 import re
@@ -104,11 +103,6 @@ POOL_BLOCK_CELLS = 8
 REAL_CHECK_POSITIONS = 200
 #: the real-map report's seed plane
 REAL_CHECK_SEED = 99999
-#: the recovery radius is MATCH_SIGMAS x the detection's position scatter at the injection's S/N (detect's constant;
-#: R3: swap to detect.MATCH_SIGMAS once detect.py defines it)
-MATCH_SIGMAS = 3.0
-#: the catalogue's detection threshold in S/N (R3: swap to the detect/mosaic constant)
-DETECTION_SNR = 5.0
 #: the pooling parameters ruled by the science track (FIX_SPEC sec 8, 12; M1, M3)
 NOISE_WINDOW = 1.5
 EDGE_RATIO = 2.0
@@ -363,11 +357,11 @@ class Injector:
         return snr * self.sigma[_rows_of(self.ids, self.cells.cell_ids(x, y))]
 
     def recovery_radius_px(self, snr, x, y):
-        """MATCH_SIGMAS x the detection's position scatter at S/N `snr`, between one pixel and half the local beam."""
+        """detect.MATCH_SIGMAS x the detection's position scatter at S/N `snr`, between one pixel and half the local beam."""
         half_beam = 0.5 * self.m.beam_px_at(x, y)
         if not np.isfinite(self.pos_k_px):
             return half_beam
-        return np.clip(MATCH_SIGMAS * self.pos_k_px / max(snr, 1e-3), 1.0, half_beam)
+        return np.clip(detect.MATCH_SIGMAS * self.pos_k_px / max(snr, 1e-3), 1.0, half_beam)
 
     def batch(self, rng: np.random.Generator, rows: np.ndarray, snr: float) -> dict:
         """One batch: positions (`positions`), fluxes, the measurement (`measure_positions`). Returns the record
@@ -474,8 +468,7 @@ def _band_of(m) -> str:
 
 class _Operations:
     """The mosaic and detection operations the injection uses (window, template_patches, paste, aperture, peaks,
-    coverage), bound once per Injector: the contract's mosaic/detect functions, or the round-2 adapter to the old
-    modules (`_OldMosaic`; R3: swap)."""
+    coverage), bound once per Injector."""
 
     def __init__(self, m):
         self.m = m
@@ -493,7 +486,7 @@ class _Operations:
 
 
 def _operations(m) -> "_Operations":
-    return m.operations() if isinstance(m, _OldMosaic) else _Operations(m)   # R3: swap (drop the adapter branch)
+    return _Operations(m)
 
 
 def _real_map_ratios(inj: Injector, flux_mjy: float, half: int, rows: Optional[np.ndarray] = None) -> np.ndarray:
@@ -617,7 +610,7 @@ def inject_task(config, m: Mosaic, detection: BandDetection, task: InjectionTask
     seconds = dict(inject=0.0, aperture=0.0)
     check = np.zeros(0)
     if task.check:
-        f_check = 10.0 * DETECTION_SNR * float(np.median(inj.sigma))
+        f_check = 10.0 * detect.DETECTION_SNR * float(np.median(inj.sigma))
         check = np.array([float(v.mean()) if v.size else np.nan
                           for v in (_real_map_ratios(inj, f_check, half, np.arange(r0, r1)) for half in (0, 1))])
     for p, half, seeds, rows in task.jobs:
@@ -657,38 +650,12 @@ def record_counts(records: dict, n_rows: int) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# record files (R3: swap to stages.write_record / read_record: stages is to the right of inject in the import order)
-
-def _write_record(path: str, tables: Dict[str, np.ndarray], attrs: Optional[dict] = None) -> dict:
-    """An HDF5 record file written atomically (temporary name with pid, fsync, os.replace), one contiguous dataset per
-    key at the root, then its receipt `<path>.receipt.json` {size, sha256} (also atomic). Returns the receipt."""
-    tmp = "%s.tmp%d" % (path, os.getpid())
-    with h5py.File(tmp, "w") as f:
-        for k, v in tables.items():
-            f.create_dataset(k, data=np.asarray(v))
-        for k, v in (attrs or {}).items():
-            f.attrs[k] = v
-    with open(tmp, "rb+") as f:
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 22), b""):
-            h.update(chunk)
-    receipt = dict(path=os.path.basename(path), size=os.path.getsize(path), sha256=h.hexdigest())
-    rtmp = "%s.receipt.json.tmp%d" % (path, os.getpid())
-    with open(rtmp, "w") as f:
-        json.dump(receipt, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(rtmp, path + ".receipt.json")
-    return receipt
-
+# record files (stages writes each piece set's record; the band's record table below is inject's own)
 
 def _read_record(path: str, keys: Optional[Sequence[str]] = None) -> Dict[str, np.ndarray]:
+    """The root datasets of an injection record file (its groups -- counts/, checks/ -- are the stage table's)."""
     with h5py.File(path, "r") as f:
-        return {k: f[k][()] for k in (f.keys() if keys is None else keys) if k in f}
+        return {k: f[k][()] for k in (f.keys() if keys is None else keys) if k in f and isinstance(f[k], h5py.Dataset)}
 
 
 def _record_files(records_dir: str) -> List[str]:
@@ -1000,11 +967,17 @@ def pool_matrices(cells: CellGrid, ids: np.ndarray, classes: np.ndarray, rule: P
     """Sparse (n, n) 0/1 pooling matrices, one per widening of `rule` (or `widenings`): (i, j) = 1 where cell centres
     (CellGrid.centres_arcsec) lie within radius x widening, the classes match and (rule.noise_window) sigma[j] /
     sigma[i] lies within the window; a cell pools with itself. Identity (legacy rule): `pacs_completeness.pool_matrices`.
-    Contract change: `widenings` and `sigma` (the window needs the cells' CELL_SIGMA) are added keywords."""
-    centres = cells.centres_arcsec(np.asarray(ids, np.int64))
+    `widenings` and `sigma` (the window needs the cells' CELL_SIGMA) are keywords."""
+    return centre_matrices(cells.centres_arcsec(np.asarray(ids, np.int64)), rule, widenings, classes, sigma)
+
+
+def centre_matrices(centres: np.ndarray, rule: PoolingRule, widenings: Optional[Sequence[int]] = None,
+                    classes: Optional[np.ndarray] = None, sigma: Optional[np.ndarray] = None) -> list:
+    """`pool_matrices` on cell centres given in arcsec ((n, 2); the completeness product's `centres`, several maps far
+    apart). Without classes every cell is one class."""
     n = len(centres)
     tree = cKDTree(centres)
-    classes = np.asarray(classes)
+    classes = np.zeros(n, np.int8) if classes is None else np.asarray(classes)
     sig = None if sigma is None else np.asarray(sigma, float)
     out = []
     for k in (rule.widenings if widenings is None else widenings):
@@ -1484,212 +1457,3 @@ def empty_band(n_src: int, n_flux: int) -> BandCompleteness:
     nan = np.zeros((0, n_flux), np.float32)
     return BandCompleteness(det, np.zeros((0, n_flux), np.uint16), z(np.float32), z(np.int32), nan, nan.copy(), None,
                             dict(stats=[]))
-
-
-# ----------------------------------------------------------------------------------------------------------------------
-# ROUND-2 ADAPTER to the old modules (R3: swap -- delete this section once mosaic.py and detect.py are filled)
-
-class _OldMosaic:
-    """The contract's Mosaic surface the injection uses, on the old prepared `pacs_fit.Tile` of a mosaic record:
-    window, template_patches, aperture (with a Window), pixel_sigma, beam_px_at, injection_half_width, pixel_arcsec,
-    band, grid.shape, layers["coverage"], key. Picklable by (config, record). R3: swap."""
-
-    def __init__(self, config, record):
-        self.config = config
-        self.record = record
-        self.key = record.path
-        self._tile = None
-
-    def __getstate__(self):
-        return dict(config=self.config, record=self.record, key=self.key, _tile=None)
-
-    @property
-    def tile(self):
-        if self._tile is None:
-            from sesnaimpute.sky.derived import pacs_fit           # R3: swap
-            self._tile = pacs_fit.cached_tile(self.config, self.record)
-        return self._tile
-
-    @property
-    def shape(self):
-        return tuple(self.record.shape)
-
-    @property
-    def band(self):
-        return self.record.band
-
-    @property
-    def pixel_arcsec(self):
-        return self.tile.pixel_arcsec
-
-    @property
-    def layers(self):
-        return {"coverage": _DenseLayer(os.path.join(self.record.mosaic_dir, "coverage.npy"), 0.0)}
-
-    def injection_half_width(self):
-        return self.tile.injection_half_width()
-
-    def beam_px_at(self, x, y):
-        return self.tile.beam_px_at(x, y)
-
-    def pixel_sigma(self, x, y):
-        return self.tile.pixel_sigma(x, y)
-
-    def window(self, y0, y1, x0, x1):
-        t = self.tile
-        return Window(y0, x0, np.array(t.image[y0:y1, x0:x1]), t.error[y0:y1, x0:x1])
-
-    def template_patches(self, x, y, flux):
-        parts = list(self.tile._template_patches(x, y, flux))
-        if not parts:
-            h = self.tile.injection_half_width()
-            return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros((0, 2 * h + 1, 2 * h + 1))
-        return tuple(np.concatenate([p[i] for p in parts]) for i in range(3))
-
-    def aperture(self, x, y, window=None, chunk=2048):
-        """`pacs_fit.Tile.aperture` on a Window (rows and columns offset; the old code offset rows only)."""
-        from sesnaimpute.sky.derived import pacs_fit                # R3: swap
-        from sesnaimpute.sky.derived.pacs_psf import MosaicPSF
-        t = self.tile
-        if window is None:
-            image, error, r0, c0 = t.image, t.error, 0, 0
-        else:
-            image, error, r0, c0 = window.image, window.error, window.y0, window.x0
-        r_ap, r_in, r_out = (r / t.pixel_arcsec for r in APERTURES[t.record.band])
-        x = np.asarray(x, float).ravel()
-        y = np.asarray(y, float).ravel()
-        n = x.size
-        rb = int(np.ceil(r_out)) + 1
-        flux, sky, sd, area = (np.full(n, np.nan) for _ in range(4))
-        cov = np.zeros(n, bool)
-        sd_eef = np.full(n, t.enclosed_fraction)
-        for lo in range(0, n, chunk):
-            sl = slice(lo, lo + chunk)
-            xs, ys = x[sl], y[sl]
-            f, s_, d_, a_, c_ = pacs_fit._aperture_core(image, error, xs - c0, ys - r0, r_ap, r_in, r_out, 5)
-            mix = t._psf.weights(xs, ys) if isinstance(t._psf, MosaicPSF) else None
-            eef, fraction = t._corrections_at(xs, ys, mix)
-            amp = np.where(c_, f / fraction, 0.0)
-            if not c_.any():
-                cov[sl] = c_
-                continue
-            model = t._outer_light(xs, ys, rb, mix)
-            for _ in range(2):
-                f, s_, d_, a_, c_ = pacs_fit._aperture_core_wing(image, error, xs - c0, ys - r0, r_ap, r_in, r_out, 5,
-                                                                 model, np.where(c_ & np.isfinite(amp), amp, 0.0))
-                amp = np.where(c_, f / eef, 0.0)
-            flux[sl], sky[sl], sd[sl], area[sl], cov[sl] = f / eef, s_, d_, a_, c_
-            sd_eef[sl] = eef
-        return mosaic.ApertureFit(flux, sky, sd * np.sqrt(area) / sd_eef, cov)
-
-    def operations(self) -> "_Operations":
-        ops = _Operations.__new__(_Operations)
-        ops.m = self
-        ops.window = self.window
-        ops.template_patches = self.template_patches
-        ops.aperture = lambda x, y, win: self.aperture(x, y, window=win)
-        ops.coverage = self.layers["coverage"]
-        ops.paste = _old_paste
-        ops.peaks = lambda inj, x, y, r, flux, win: _old_window_peaks(self, inj, x, y, r, flux, win)
-        return ops
-
-
-class _DenseLayer:
-    """A dense .npy layer read through the TiledLayer `window` surface (fill outside the grid). R3: swap."""
-
-    def __init__(self, path, fill):
-        self.a = np.load(path, mmap_mode="r")
-        self.fill = fill
-
-    def window(self, y0, y1, x0, x1):
-        ny, nx = self.a.shape
-        out = np.full((y1 - y0, x1 - x0), self.fill, self.a.dtype)
-        a0, a1, b0, b1 = max(y0, 0), min(y1, ny), max(x0, 0), min(x1, nx)
-        if a1 > a0 and b1 > b0:
-            out[a0 - y0:a1 - y0, b0 - x0:b1 - x0] = self.a[a0:a1, b0:b1]
-        return out
-
-
-def _old_paste(window: Window, cx, cy, patches) -> None:
-    """`pacs_fit._paste` of each patch, in order, into the window (grid coordinates). R3: swap -> mosaic.paste."""
-    ny, nx = window.image.shape
-    for i in range(len(cx)):
-        p = patches[i]
-        x0, y0 = int(cx[i]) - window.x0, int(cy[i]) - window.y0
-        side_y, side_x = p.shape
-        a0, b0 = max(x0, 0), max(y0, 0)
-        a1, b1 = min(x0 + side_x, nx), min(y0 + side_y, ny)
-        if a1 <= a0 or b1 <= b0:
-            continue
-        window.image[b0:b1, a0:a1] += p[b0 - y0:b1 - y0, a0 - x0:a1 - x0].astype(np.float32)
-
-
-def _old_window_peaks(om: _OldMosaic, inj: Injector, x, y, radius_px, flux, window: Window):
-    """`pacs_completeness.window_peaks` with the found peak's flux measured on a Window (`_OldMosaic.aperture`). R3:
-    swap -> detect.window_peaks."""
-    from sesnaimpute.sky.derived import pacs_completeness as pc   # R3: swap
-    from sesnaimpute.sky.derived import pacs_fit
-    tile = om.tile
-    x = np.asarray(x, float)
-    y = np.asarray(y, float)
-    n = x.size
-    out = (np.zeros(n, bool), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan))
-    if n == 0:
-        return out
-    ms = pc.matched_state(tile)
-    rad = np.broadcast_to(np.asarray(radius_px, float), (n,))[:, None, None]
-    h = int(np.ceil(rad.max())) + 2
-    off = np.arange(-h, h + 1)
-    cx, cy = np.rint(x).astype(np.int64), np.rint(y).astype(np.int64)
-    px = np.ascontiguousarray(np.broadcast_to(cx[:, None, None] + off[None, None, :], (n, off.size, off.size)))
-    py = np.ascontiguousarray(np.broadcast_to(cy[:, None, None] + off[None, :, None], (n, off.size, off.size)))
-    dist = np.hypot(px - x[:, None, None], py - y[:, None, None])
-    ny, nx = tile.shape
-    use = (dist <= rad + 1.5) & (px >= 0) & (px < nx) & (py >= 0) & (py < ny)
-    v = np.full(px.shape, np.nan)
-    v[use] = ms["m"][py[use], px[use]]
-    if flux is not None:
-        v = v + pc._injected_delta(tile, x, y, np.broadcast_to(np.asarray(flux, float), x.shape), px, py)
-    cid = tile.grid.cell_ids(px, py)
-    good = cid >= 0
-    v = np.where(good, v - inj.m_offset_cell[np.maximum(cid, 0)], np.nan)
-    thr = np.where(good, pacs_fit.DETECTION_SNR * inj.m_sigma_cell[np.maximum(cid, 0)], np.nan)
-    pk = pc._local_peaks(v, thr) & (dist <= rad)
-    found, xc, yc, fnu, dd = out
-    cand = np.where(pk, dist, np.inf).reshape(n, -1)
-    best = np.argmin(cand, axis=1)
-    has = np.isfinite(cand[np.arange(n), best])
-    for i in np.flatnonzero(has):
-        iy, ix = divmod(int(best[i]), off.size)
-        dy, dx = pc._parabola(v[i], iy, ix)
-        xc[i], yc[i] = px[i, iy, ix] + dx, py[i, iy, ix] + dy
-    if has.any():
-        cidh = tile.grid.cell_ids(xc[has], yc[has])
-        offh = np.where(cidh >= 0, inj.offset_cell[np.maximum(cidh, 0)], np.nan)
-        a = om.aperture(xc[has], yc[has], window=window)
-        fnu[has] = np.where(a.covered, a.flux - offh, np.nan)
-        dd[has] = np.hypot(xc[has] - x[has], yc[has] - y[has])
-        found[has] = dd[has] <= rad[has, 0, 0]
-    return found, xc, yc, fnu, dd
-
-
-def _old_band_detection(state: dict) -> BandDetection:
-    """A BandDetection from the old DETECT state (`pacs_stages.detect`'s detect.pkl dict, one map). R3: swap."""
-    g = state["geometry"][0][2]
-    cg = CellGrid(g.wcs, tuple(g.shape), float(g.step_x), float(g.step_y), int(g.nx), int(g.ny))
-    cols = state["cols"]
-    ids = np.asarray(state["cell_id"], np.int64)
-    cells = CellStats(ids=ids, n_sigma=np.asarray(cols["n_sigma"]), sigma=np.asarray(state["cell_sigma"]),
-                      offset=np.asarray(state["cell_offset"]), sky=np.asarray(cols["sky"]), ra=np.asarray(cols["ra"]),
-                      dec=np.asarray(cols["dec"]), m_sigma=np.asarray(state["m_sigma_rows"]),
-                      m_offset=np.asarray(state["m_offset_rows"]), covered=np.ones(ids.size, bool))
-    p = state["peaks"]
-    peaks = Peaks(x=np.asarray(p["x"], float), y=np.asarray(p["y"], float), fnu=np.asarray(p["fnu"], float),
-                  cell=ids[np.asarray(p["row"], np.int64)] if ids.size else np.zeros(0, np.int64),
-                  row=np.asarray(p["row"], np.int64), snr=np.asarray(p["snr"], float), bin=np.asarray(p["bin"]),
-                  ra=np.asarray(p["ra"], float), dec=np.asarray(p["dec"], float), neg_count=np.zeros(0, np.int64))
-    sh = state["shifts"][0]
-    return BandDetection(cells=cells, cell_grid=cg, shift=(float(sh[0]), float(sh[1]), int(sh[2])),
-                         src_row=np.asarray(state["src_row"]), cell_bin=np.asarray(state["cell_bin"]), peaks=peaks,
-                         pos_k_arcsec=float(state["pos_k"]), r_match=float(state["r_match"][0]),
-                         kernel=Kernel(0, np.zeros((1, 1)), np.zeros((1, 1)), 0.0), n_src=int(state["n_src"]))

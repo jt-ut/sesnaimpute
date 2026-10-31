@@ -89,14 +89,6 @@ def photometry_path(config, region: str) -> str:
 # ----------------------------------------------------------------------------------------------------------------------
 # the completeness product
 
-def _snr_grid() -> np.ndarray:
-    try:
-        return inject.snr_grid()
-    except NotImplementedError:                                      # R3: swap
-        from sesnaimpute.sky.derived import pacs_completeness
-        return pacs_completeness.snr_grid()
-
-
 def _strings(values, n_rows: int = None) -> np.ndarray:
     """A byte-string array as the old writer made it (empty: one-byte strings)."""
     return np.array(list(values) or [""], dtype="S")[:len(values)]
@@ -140,7 +132,7 @@ def write_completeness(path: str, region: str, mag: np.ndarray, bands: Dict[str,
     every dataset and attribute byte-identical (FROZEN 1/4: CELL_ID and row order)."""
     stem = "completeness_pacs_source"
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    snr = _snr_grid()
+    snr = inject.snr_grid()
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "source"
         f.attrs["REGION"] = region

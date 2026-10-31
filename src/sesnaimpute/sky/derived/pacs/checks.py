@@ -37,19 +37,18 @@ What the checks read of the carriers (contract changes needed are listed in REPO
 .injection_half_width, .pixel_arcsec, .band; BandCompleteness.held: row, plane, near, recovered, dflux, flux, det_flux and
 build_errors = {"scatter": (n_row, n_plane)} (the error built from the build half alone); optionally build_row,
 build_plane, build_recovered (the build half's records, for the derived C1 bar).
-
-The `# R3: swap` blocks at the end call the old build's modules for what mosaic.py/psf.py/inject.py (still skeletons on
-main when this was gated) will provide.
 """
 
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.spatial import cKDTree
 
+from sesnaimpute.catalog import curated
 from sesnaimpute.definitions import PACS_APERTURES as APERTURES
 from sesnaimpute.definitions import PACS_BANDS as BANDS
 from sesnaimpute.definitions import PACS_BLEND_RADIUS_BEAMS as BLEND_RADIUS_BEAMS
@@ -57,7 +56,7 @@ from sesnaimpute.definitions import PACS_MIN_INJECTIONS as MIN_INJECTIONS
 from sesnaimpute.definitions import PACS_POOL_WIDENINGS as POOL_WIDENINGS
 from sesnaimpute.definitions import PACS_SNR_BIN_CENTRES as SNR_BIN_CENTRES
 from sesnaimpute.definitions import COMPLETENESS_STORAGE_SCALE as STORAGE_SCALE
-from sesnaimpute.sky.derived.pacs import grid, inject, mosaic, photometry, products
+from sesnaimpute.sky.derived.pacs import grid, inject, mosaic, photometry, products, psf
 from sesnaimpute.sky.derived.pacs.inject import BandCompleteness
 from sesnaimpute.sky.derived.pacs.mosaic import Mosaic, Window
 from sesnaimpute.sky.derived.pacs.products import CheckRow
@@ -81,7 +80,6 @@ SOURCE_PHASES = tuple((a / 3.0, b / 3.0) for b in (-1, 0, 1) for a in (-1, 0, 1)
 ZERO_CHECK_FLUX_MJY = 500.0
 ZERO_CHECK_POSITIONS = 20
 ZERO_CHECK_TOLERANCE = 0.005
-REAL_CHECK_POSITIONS = 200
 #: C1 (pacs_completeness._acceptance_c1): the held-out curve against the stored one on the transition planes
 C1_TRANSITION = (0.02, 0.98)
 C1_SIGMA1_BAR = 60.0
@@ -157,31 +155,15 @@ def _robust(v):
 # ----------------------------------------------------------------------------------------------------------------------
 # the S/N-plane machinery the completeness checks read (inject.py's, until it is filled)
 
-def _snr_grid() -> np.ndarray:
-    try:
-        return inject.snr_grid()
-    except NotImplementedError:                                      # R3: swap
-        return _old_completeness().snr_grid()
-
-
-def _inject_fn(name: str):
-    """`inject.<name>`, or the old build's function of the same name while inject.py is a skeleton."""
-    try:
-        inject.snr_grid()
-        return getattr(inject, name)
-    except NotImplementedError:                                      # R3: swap
-        return getattr(_old_completeness(), name)
-
-
 def _pool_matrices(centres: np.ndarray) -> list:
     """The pooling matrices (radius PACS_POOL_ARCSEC x each widening, no class) of cells at `centres` (arcsec)."""
-    return _old_completeness().pool_matrices(centres)                # R3: swap (inject.pool_matrices(cells, ids, classes, rule))
+    return inject.centre_matrices(centres, inject.PoolingRule.legacy())
 
 
 def _snr_brackets(sigma_rows, flux_grid):
     """For every (row, flux plane): the two S/N planes bracketing F / CELL_SIGMA of the row and the weight of the upper one
     (linear in log S/N; held at the grid's ends)."""
-    snr = _snr_grid()
+    snr = inject.snr_grid()
     lo, n_x = np.log10(snr[0]), snr.size
     step = (np.log10(snr[-1]) - lo) / (n_x - 1)
     with np.errstate(all="ignore"):
@@ -233,9 +215,9 @@ def _flux90_halves_bar(completeness: dict, held: dict, reps: int = BAR_REPS, see
     over a bootstrap of the map's (block, repetition) units, BAR_BLOCK_ARCSEC blocks, drawn until the map's cell count is reached
     (the realised share of one split, not the expected one, is what the measured share is). Returns (bar, S_hat,
     sigma, blocks); NaN bar where fewer than BAR_MIN_BLOCKS blocks (the map is too small to have a bar)."""
-    snr = _snr_grid()
+    snr = inject.snr_grid()
     n_x = snr.size
-    flux90 = _inject_fn("flux90")
+    flux90 = inject.flux90
     n_row = completeness["curve"].shape[0]
     Ws = _pool_matrices(completeness["centres"])
     stride = max(1, int(np.ceil(n_row / BAR_MAX_CELLS)))
@@ -314,8 +296,8 @@ def completeness_c1(band: str, completeness: dict, held: dict) -> List[CheckRow]
     halves (>= 60 %), within 2 sigma (>= 93 %), within 0.03 absolute (information); and the share of cells whose FLUX90 of the
     two halves agree within 10 %, against the bar derived from the map's own counts (`_flux90_halves_bar`)."""
     d = completeness
-    curve_on_flux_grid = _inject_fn("curve_on_flux_grid")
-    flux90 = _inject_fn("flux90")
+    curve_on_flux_grid = inject.curve_on_flux_grid
+    flux90 = inject.flux90
     n_row, n_plane = d["curve"].shape
     Ws = _pool_matrices(d["centres"])
     fh, tot = curve_on_flux_grid(Ws, held["row"].astype(np.int64), held["plane"].astype(np.int64), held["recovered"].astype(bool),
@@ -379,8 +361,8 @@ def completeness_c2(band: str, completeness: dict, held: dict) -> List[CheckRow]
     sources' fluxes (the flux of the PACS source the blind detection found)."""
     d = completeness
     e = held["build_errors"]
-    snr_bin = _inject_fn("snr_bin")
-    bin_of_plane = snr_bin(_snr_grid())
+    snr_bin = inject.snr_bin
+    bin_of_plane = snr_bin(inject.snr_grid())
     row = held["row"].astype(np.int64)
     plane = held["plane"].astype(np.int64)
     k = bin_of_plane[plane]
@@ -436,7 +418,7 @@ def detection_report(band: str, completeness: dict, held: dict) -> List[CheckRow
     floor (its value at the faintest flux plane, the chance of lying within the radius of an existing PACS source) by sky bin
     (`_report_detection`)."""
     d = completeness
-    snr = _snr_grid()[held["plane"].astype(np.int64)]
+    snr = inject.snr_grid()[held["plane"].astype(np.int64)]
     bright = snr >= DETECTION_SNR
     frac = float(held["recovered"][bright].mean()) if bright.any() else np.nan
     rows = [_row("DETECTION_RECOVERY_SNR20", band, frac, low=DETECTION_RECOVERY_BAR,
@@ -473,7 +455,6 @@ def _read_hops(config):
 def _match_hops(config, region):
     """The HOPS targets matched to the region's SESNA sources within HOPS_MATCH_ARCSEC (nearest source): `(hops index,
     source row)` arrays, plus the HOPS fluxes."""
-    from sesnaimpute.catalog import curated
     ra, dec, f70 = _read_hops(config)
     _name, s_ra, s_dec = curated.read_positions(config, region)
     tree = cKDTree(photometry.unit_vectors(s_ra.astype(np.float64), s_dec.astype(np.float64)))
@@ -577,13 +558,50 @@ def _read_hppsc(config, band):
     return out
 
 
+def input_checks(config, region: str, band: str) -> List[CheckRow]:
+    """What a build would otherwise find out at FINISH, checked at stage psf (the retired preflight's input checks): the
+    band's HPPSC list and observation table read and non-empty (INPUT_HPPSC), the HOPS table read (INPUT_HOPS: the
+    targets matched in the region, none outside Orion), the region's SESNA positions (INPUT_POSITIONS > 0), and the
+    completeness writer on empty bands (INPUT_WRITERS: every dataset name registered). A failure is a FAIL row (the
+    stage stops). Writes only a temporary file."""
+    import tempfile
+    rows = []
+
+    def guarded(name, fn):
+        try:
+            value, detail = fn()
+            rows.append(_row(name, band, value, low=1.0, detail=detail))
+        except Exception as e:                    # noqa: BLE001 -- the failure is the row
+            rows.append(_row(name, band, 0.0, low=1.0, detail="FAILED: %r" % (e,)))
+
+    def hppsc():
+        h = _read_hppsc(config, band)
+        return float(min(h["ra"].size, len(h["obsids"]))), "%d HPPSC sources, %d observations" % (h["ra"].size, len(h["obsids"]))
+
+    def hops():
+        n = _match_hops(config, region)[0].size
+        return 1.0, "HOPS table read; %d targets matched in the region" % n
+
+    def positions():
+        _name, ra, _dec = curated.read_positions(config, region)
+        return float(len(ra)), "%d SESNA positions" % len(ra)
+
+    def writers():
+        mag, _fgrid = inject.flux_grid()
+        bands = {b: inject.empty_band(5, mag.size) for b in BANDS}
+        with tempfile.TemporaryDirectory(dir=os.path.join(config.data_root, "sky", "derived")) as tmp:
+            products.write_completeness(os.path.join(tmp, "c.hdf5"), region, mag, bands)
+        return 1.0, "write_completeness on empty bands"
+
+    for name, fn in (("INPUT_HPPSC", hppsc), ("INPUT_HOPS", hops), ("INPUT_POSITIONS", positions),
+                     ("INPUT_WRITERS", writers)):
+        guarded(name, fn)
+    return rows
+
+
 def _mosaic_psf(config, region, band, box):
     """The band mosaic's PSF without its tables (weights and beams only)."""
-    try:
-        return Mosaic(config, region, band, box, psf_tables=False).psf
-    except NotImplementedError:                                      # R3: swap
-        from sesnaimpute.sky.derived import pacs_fit
-        return pacs_fit.mosaic_psf(config, region, band, box)
+    return Mosaic(config, region, band, box, psf_tables=False).psf
 
 
 def hppsc_checks(config, region: str, sources_path: str, photometry_path: str,
@@ -683,6 +701,18 @@ def chance_check(counts: dict) -> List[CheckRow]:
                  info=True)]
 
 
+def real_map_rows(band: str, stats: dict) -> List[CheckRow]:
+    """REAL_MAP_MEAN_RATIO (information, one row per half): the mean of (aperture flux after injecting F minus before) / F
+    at inject.REAL_CHECK_POSITIONS empty-sky positions of the real map, F = 10 x DETECTION_SNR x the median CELL_SIGMA
+    (inject._real_map_ratios, run by the designated injection piece; the band's statistics carry it as `check`).
+    Identity: `pacs_completeness._real_check`'s printed means."""
+    check = (stats or {}).get("check")
+    if check is None:
+        return []
+    return [_row("REAL_MAP_MEAN_RATIO", band, float(v), detail="half %d: injected-minus-before / F on the real map" % h,
+                 info=True) for h, v in enumerate(check)]
+
+
 def region_checks(config, region: str, bands: Dict[str, BandCompleteness], box: Optional[Sequence[float]] = None,
                   reference_product: Optional[str] = None) -> List[CheckRow]:
     """Every check after FINISH, in one list (C1, C2, detections, C4/C5, HPPSC, chance), for products.write_checks.
@@ -698,6 +728,7 @@ def region_checks(config, region: str, bands: Dict[str, BandCompleteness], box: 
             continue
         c = products.read_completeness_band(comp, b)
         rows += completeness_c1(b, c, held) + completeness_c2(b, c, held) + detection_report(b, c, held)
+        rows += real_map_rows(b, bands[b].stats)
     phot = products.photometry_path(config, region)
     rows += hops_checks(config, region, phot, reference_product)
     rows += hppsc_checks(config, region, products.sources_path(config, region), phot, box)
@@ -718,15 +749,15 @@ def _representative_maps(config, meta: dict) -> list:
     for i in meta["rep"]:
         q = meta["maps"][i]
         rec = recs[q["path"]]
-        out.append((rec, q, grid.celestial_wcs(rec.wcs_header), _components(config, rec)))
+        out.append((rec, q, grid.celestial_wcs(rec.wcs_header), psf.published_components(config, rec)))
     return out
 
 
 def _aperture_sum(img, x, y, radii_px):
     """The aperture sum before sky (the aperture sum the divisor is the fraction of) at pixel (x, y)."""
     r_ap, r_in, r_out = radii_px
-    f, s, _sd, area, cov = _aperture_core(np.ascontiguousarray(img, np.float32), np.ones(img.shape, np.float32),
-                                          np.array([x]), np.array([y]), r_ap, r_in, r_out)
+    f, s, _sd, area, cov = mosaic._aperture_core(np.ascontiguousarray(img, np.float32), np.ones(img.shape, np.float32),
+                                                 np.array([x]), np.array([y]), r_ap, r_in, r_out, grid.APERTURE_SUBPIXELS)
     if not cov[0]:
         raise ValueError("the aperture of the synthetic source is not covered")
     return float(f[0] + s[0] * area[0])
@@ -753,7 +784,7 @@ def _template_in_aperture(comps, in_wcs, r_ap, step=0.4, nbox=7):
         for u in c:
             for v in c:
                 de, dn = m @ np.array([u, v])
-                total += _density(comps, xx.ravel() + de, yy.ravel() + dn).reshape(xx.shape)
+                total += psf.template_density(comps, xx.ravel() + de, yy.ravel() + dn).reshape(xx.shape)
         _DISC[key] = float((total / nbox ** 2 * w).sum() * step ** 2)
     return _DISC[key]
 
@@ -764,8 +795,8 @@ def _unit_source(rep, out_wcs, band, xo, yo, half_out, phases=PHASES):
     +-0.2 % in an aperture sum): returns (A_real, A_template, block, x0, y0), the block (2 half_out + 1)^2 of the resampled
     image (flux fraction per output pixel) with lower-left pixel (x0, y0)."""
     rec, _q, in_wcs, comps = rep
-    in_area = _pixel_area_arcsec2(in_wcs)
-    out_area = _pixel_area_arcsec2(out_wcs)
+    in_area = mosaic.pixel_area_arcsec2(in_wcs)
+    out_area = mosaic.pixel_area_arcsec2(out_wcs)
     pix_in, pix_out = np.sqrt(in_area), np.sqrt(out_area)
     r_ap, r_in, r_out = APERTURES[band]
     half_in = int(np.ceil(1.3 * half_out * pix_out / pix_in)) + 4
@@ -785,7 +816,7 @@ def _unit_source(rep, out_wcs, band, xo, yo, half_out, phases=PHASES):
     # offsets on the sky from the source (arcsec; the flat form is exact to 1e-7 inside the template's +-100 arcsec)
     east = (((ra - ra0 + 180.0) % 360.0) - 180.0) * np.cos(np.radians((dec + dec0) / 2)) * 3600.0
     north = (dec - dec0) * 3600.0
-    density = _density(comps, east, north).reshape(m, m)
+    density = psf.template_density(comps, east, north).reshape(m, m)
     cx, cy = int(np.rint(xo)), int(np.rint(yo))
     x0, y0 = cx - half_out, cy - half_out
     block = 0.0
@@ -807,13 +838,13 @@ def _expected_enclosed(config, m, x, y, mix):
     number from the PSF build). Returns (expected (n,), worst |A_direct/EEF - 1|)."""
     meta = m.psf.meta
     reps = _representative_maps(config, meta)
-    eef = [_aperture_eef(config, r[0]) for r in reps]
+    eef = [psf.aperture_eef(config, r[0]) for r in reps]
     half_out = int(np.ceil(APERTURES[m.band][2] / m.pixel_arcsec)) + 4
     out = np.zeros(len(x))
     worst = 0.0
     for i in range(len(x)):
         for k in np.flatnonzero(mix[i] > 0):
-            a_real, a_direct, *_ = _unit_source(reps[k], _out_wcs(m), m.band, x[i], y[i], half_out)
+            a_real, a_direct, *_ = _unit_source(reps[k], m.grid.wcs, m.band, x[i], y[i], half_out)
             out[i] += mix[i, k] * eef[k] * a_real / a_direct
             worst = max(worst, abs(a_direct / eef[k] - 1))
     return out, worst
@@ -824,7 +855,7 @@ def _check_positions(m, meta, rep_entry, margin):
     mid-cells between them, 4 at 80 % of the half-extent, and 10/20/30 arcsec inside and outside the footprint edge of the
     representative map (the first of its four edges that lies inside the mosaic), at a fixed sub-pixel phase."""
     ny, nx = m.psf.shape
-    n = _node_count(m)
+    n = m.grid.psf_node_count()
     sx = np.linspace(-.5, nx - .5, n)
     sy = np.linspace(-.5, ny - .5, n)
     pts = [(a, b, "node") for b in sy for a in sx]
@@ -833,7 +864,7 @@ def _check_positions(m, meta, rep_entry, margin):
     cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
     pts += [(cx + s * 0.8 * nx / 2, cy + t * 0.8 * ny / 2, "outer") for s in (-1, 1) for t in (-1, 1)]
     x0, x1, y0, y1 = meta["maps"][rep_entry]["bbox"]
-    pix = float(np.mean(np.abs(np.diag(_out_wcs(m).pixel_scale_matrix)))) * 3600.0
+    pix = float(np.mean(np.abs(np.diag(m.grid.wcs.pixel_scale_matrix)))) * 3600.0
     for edge in ("left", "right", "bottom", "top"):
         c = {"left": x0, "right": x1, "bottom": y0, "top": y1}[edge]
         horizontal = edge in ("left", "right")
@@ -872,7 +903,7 @@ def _injected_window(m: Mosaic, x: float, y: float, flux: float, reach: int, mix
     win = Window(cy - reach, cx - reach, np.zeros((side, side), np.float32),
                  np.ones((side, side), np.float32) if error is None else np.array(error, np.float32))
     px, py, patches = m.template_patches(np.array([x]), np.array([y]), np.full(1, flux), mixture)
-    _paste(win, px, py, patches)
+    mosaic.paste(win, px, py, patches)
     return win
 
 
@@ -888,7 +919,7 @@ def zero_image_check(config, m: Mosaic) -> List[CheckRow]:
     position within 0.5 %. Also the template against the release EEF (1.5 %) and, as information, the share of the aperture
     flux the sky term of the catalogue's own measurement removes on a zero image."""
     rng = np.random.default_rng(0)
-    ny, nx = _shape(m)
+    ny, nx = tuple(m.grid.shape)
     h = m.injection_half_width()
     margin = h + 2
     r_ap, r_in, r_out = (r / m.pixel_arcsec for r in APERTURES[m.band])
@@ -914,7 +945,7 @@ def zero_image_check(config, m: Mosaic) -> List[CheckRow]:
         cx, cy = int(np.rint(x[i])), int(np.rint(y[i]))
         err = m.window(cy - R, cy + R + 1, cx - R, cx + R + 1).error
         win = _injected_window(m, x[i], y[i], ZERO_CHECK_FLUX_MJY, R, error=err)
-        fi, si, _sd, ai, ci = _aperture_core(win.image, win.error, np.array([x[i] - win.x0]), np.array([y[i] - win.y0]), r_ap, r_in, r_out)
+        fi, si, _sd, ai, ci = mosaic._aperture_core(win.image, win.error, np.array([x[i] - win.x0]), np.array([y[i] - win.y0]), r_ap, r_in, r_out, grid.APERTURE_SUBPIXELS)
         f[i], sky[i], area[i], cov[i] = fi[0], si[0], ai[0], ci[0]
     eef, tie = _expected_enclosed(config, m, x, y, m.psf.weights(x, y))
     expected = ZERO_CHECK_FLUX_MJY * eef
@@ -959,14 +990,14 @@ def normalisation_check(config, m: Mosaic, n_jobs: Optional[int] = None) -> List
         x, y = np.array([p[0] for p in pts]), np.array([p[1] for p in pts])
         w = psf.map_weights(x, y)[:, k] if pts else np.zeros(0)
         positions[k] = [p for p, wk in zip(pts, w) if wk > 0]
-    out_wcs = _out_wcs(m)
+    out_wcs = m.grid.wcs
     real = Parallel(n_jobs=n_jobs or 1)(delayed(_real_sources)(rep, out_wcs, m.band, positions[k], half_out, h)
                                         for k, rep in enumerate(reps))
     reach = int(np.ceil(r_px[2])) + 3
     R = max(reach, h)
     tol = dict(divisor=TIE_TOLERANCE, injected=TIE_TOLERANCE, sums=SUM_TOLERANCE, tie=RELEASE_TOLERANCE)
     for k, rep in enumerate(reps):
-        eef = _aperture_eef(config, rep[0])
+        eef = psf.aperture_eef(config, rep[0])
         one = np.zeros((1, psf.n_sub))
         one[0, k] = 1.0
         for (x, y, kind), (a_real, a_mean, a_direct, real_patch) in zip(positions[k], real[k]):
@@ -998,114 +1029,22 @@ def normalisation_check(config, m: Mosaic, n_jobs: Optional[int] = None) -> List
     return rows
 
 
-def real_map_check(m: Mosaic, injector: "inject.Injector", flux_mjy: float, half: int,
-                   rows: Optional[np.ndarray] = None) -> List[CheckRow]:
-    """REAL_MAP (information only): injected sources on the real map recovered as on the zero image, on a private
-    Window (no whole-grid copy-on-write map). Identity: `pacs_completeness._real_check`'s numbers.
-
-    The catalogue's own measurement in its own regime: REAL_CHECK_POSITIONS empty-sky positions of the real map (farther than
-    one beam from every detected source), the aperture flux after injecting `flux_mjy` minus before, over `flux_mjy`.
-    `rows`: the rows the positions are drawn from (default all). One row: the mean ratio, with the 16/50/84 per cent in the
-    detail."""
-    rng = np.random.default_rng([injector.seed_key, 99999, half])
-    n_rows = injector.n_rows if hasattr(injector, "n_rows") else injector.ids.size
-    x, y, d = injector.positions(rng, np.arange(n_rows) if rows is None else rows)
-    far = d >= BLEND_RADIUS_BEAMS * m.beam_px_at(x, y)
-    x, y = x[far][:REAL_CHECK_POSITIONS], y[far][:REAL_CHECK_POSITIONS]
-    r = _real_ratios(m, x, y, flux_mjy)
-    q = np.percentile(r, [16, 50, 84]) if r.size else np.full(3, np.nan)
-    return [_row("REAL_MAP_MEAN_RATIO", m.band, r.mean() if r.size else np.nan,
-                 detail="injected-minus-before / F on the real map, F = %.0f mJy, half %d; 16/50/84 %%: %.4f %.4f %.4f"
-                 % (flux_mjy, half, *q), n=int(r.size), info=True)]
-
-
-def _real_ratios(m: Mosaic, x: np.ndarray, y: np.ndarray, flux_mjy: float) -> np.ndarray:
-    """(after - before) / flux of the forced aperture flux at the map pixels (x, y), the sources pasted into a private window
-    of the rows the positions span (plus the patch and annulus reach); only positions covered before and after."""
-    h = m.injection_half_width()
-    reach = h + int(np.ceil(max(r for r in APERTURES[m.band]) / m.pixel_arcsec)) + 3
-    ny, nx = _shape(m)
-    y0, y1 = max(int(np.floor(y.min())) - reach, 0), min(int(np.ceil(y.max())) + reach + 1, ny)
-    x0, x1 = max(int(np.floor(x.min())) - reach, 0), min(int(np.ceil(x.max())) + reach + 1, nx)
-    win = m.window(y0, y1, x0, x1)
-    before = m.aperture(x, y, window=win)
-    after_win = Window(win.y0, win.x0, np.array(win.image), win.error)
-    px, py, patches = m.template_patches(x, y, np.full(x.shape, flux_mjy))
-    _paste(after_win, px, py, patches)
-    after = m.aperture(x, y, window=after_win)
-    ok = before.covered & after.covered
-    return (after.flux[ok] - before.flux[ok]) / flux_mjy
-
-
 # ----------------------------------------------------------------------------------------------------------------------
-# R3: swap -- the old build's pieces behind the names above
+# a synthetic input map through the real resampler
 
-def _old_completeness():
-    from sesnaimpute.sky.derived import pacs_completeness
-    return pacs_completeness
+class _ArrayMap(psf.InputMap):
+    """An input map whose layers are caller arrays (image, error 1e-3, coverage 1) on `wcs`: the zero-image check's
+    synthetic unit source through `mosaic.resample_window`."""
 
+    def __init__(self, image: np.ndarray, wcs):
+        super().__init__(record=SimpleNamespace(shape=image.shape), wcs=wcs, maps_root="")
+        self._layers = (image, np.full(image.shape, 1e-3), np.ones(image.shape))
 
-def _is_old(m) -> bool:
-    return hasattr(m, "tile")
-
-
-def _shape(m) -> Tuple[int, int]:
-    return tuple(m.tile.shape) if _is_old(m) else tuple(m.grid.shape)
-
-
-def _out_wcs(m):
-    return m.tile.wcs if _is_old(m) else m.grid.wcs
-
-
-def _node_count(m) -> int:
-    return int(m.psf.enclosed.shape[-1]) if _is_old(m) else m.grid.psf_node_count()
-
-
-def _aperture_core(img, err, xs, ys, r_ap, r_in, r_out):
-    """mosaic's numba core (5 x 5 sub-pixels): (flux, sky, sd, area, covered)."""
-    from sesnaimpute.sky.derived import pacs_fit
-    return pacs_fit._aperture_core(img, err, xs, ys, r_ap, r_in, r_out, 5)
-
-
-def _components(config, rec):
-    from sesnaimpute.sky.derived import pacs_psf
-    return pacs_psf.published_components_for_map(config, rec)
-
-
-def _density(comps, east, north):
-    from sesnaimpute.sky.derived import pacs_fit
-    return pacs_fit._template_density(comps, east, north)
-
-
-def _aperture_eef(config, rec):
-    from sesnaimpute.sky.derived import pacs_psf
-    return pacs_psf.aperture_eef(config, rec)
-
-
-def _pixel_area_arcsec2(wcs):
-    from sesnaimpute.sky.derived import pacs_mosaic
-    return pacs_mosaic.pixel_area_arcsec2(wcs)
+    def layers(self, rows: slice, cols: slice):
+        return tuple(np.array(a[rows, cols], dtype=np.float64) for a in self._layers)
 
 
 def _resample(img, in_wcs, out_wcs, out_area, x0, x1, y0, y1):
-    """The real resampler applied to a synthetic input image (mosaic.py has no entry point for caller-supplied layers)."""
-    from types import SimpleNamespace
-    from sesnaimpute.sky.derived import pacs_mosaic
-    return pacs_mosaic.resample_block(None, SimpleNamespace(shape=img.shape), in_wcs, out_wcs, out_area, x0, x1, y0, y1,
-                                      layers=(img, np.full(img.shape, 1e-3), np.ones(img.shape)))
-
-
-def _paste(window: Window, cx, cy, patches) -> None:
-    """mosaic.paste (float32 addition as in pacs_fit._paste), for patches whose lower-left pixels are in grid coordinates."""
-    try:
-        return mosaic.paste(window, cx, cy, patches)
-    except NotImplementedError:                                      # R3: swap (delete the rest of this function)
-        pass
-    ny, nx = window.image.shape
-    for i in range(len(cx)):
-        gx, gy = int(cx[i]) - window.x0, int(cy[i]) - window.y0
-        patch = patches[i]
-        a0, b0 = max(gx, 0), max(gy, 0)
-        a1, b1 = min(gx + patch.shape[1], nx), min(gy + patch.shape[0], ny)
-        if a1 > a0 and b1 > b0:
-            window.image[b0:b1, a0:a1] += patch[b0 - gy:b1 - gy, a0 - gx:a1 - gx].astype(np.float32)
+    """The real resampler applied to a synthetic input image (`out_area` is the output grid's reference pixel area,
+    which resample_window takes from the grid)."""
+    return mosaic.resample_window(_ArrayMap(img, in_wcs), SimpleNamespace(wcs=out_wcs), y0, y1, x0, x1, with_smooth=False)

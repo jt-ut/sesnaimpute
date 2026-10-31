@@ -1252,6 +1252,15 @@ class Mosaic:
         self._tree = None
         self._outer_cache = None
 
+    @property
+    def inputs(self) -> List[psf.InputMap]:
+        """The mosaic's input maps in META order (record from the region's index, celestial WCS; no smoothed error)."""
+        if getattr(self, "_inputs", None) is None:
+            recs = {r.path: r for r in read_index(self.config, self.region)}
+            self._inputs = [psf.InputMap(recs[q["path"]], grid.celestial_wcs(recs[q["path"]].wcs_header),
+                                         maps_root(self.config)) for q in self.meta.get("maps", ())]
+        return self._inputs
+
     def __getstate__(self):
         config = self._args[0]
         fields = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
