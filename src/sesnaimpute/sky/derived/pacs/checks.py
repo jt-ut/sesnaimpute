@@ -213,7 +213,7 @@ def _flux90_halves_bar(completeness: dict, held: dict, reps: int = BAR_REPS, see
     stored pooled counts and curves. Per (cell, S/N plane) the truth p is the pooled recovered fraction of both halves on the
     widening the held half chose (the build half's records, `held` carrying build_row/build_plane/build_recovered; without them the held half alone
     roughens the curves, S_hat falls and a bar from it would be lenient, so there is no bar: only S_hat), the two halves are drawn Binomial(n, p)/n
-    (n the held half's pooled count), read at F / CELL_SIGMA and FLUX90 taken as the code takes it; S_hat = 100 x (1 - mean
+    (n the held half's pooled count; under the gradient curve each half's count on the widening it chooses from its own counts, as CURVE is taken), read at F / CELL_SIGMA and FLUX90 taken as the code takes it; S_hat = 100 x (1 - mean
     over cells of P[|FLUX90_A - FLUX90_B| / FLUX90_B > 10 %]) over `reps` draws; sigma = the standard deviation of that share
     over a bootstrap of the map's (block, repetition) units, BAR_BLOCK_ARCSEC blocks, drawn until the map's cell count is reached
     (the realised share of one split, not the expected one, is what the measured share is). Returns (bar, S_hat,
@@ -225,7 +225,7 @@ def _flux90_halves_bar(completeness: dict, held: dict, reps: int = BAR_REPS, see
     stride = max(1, int(np.ceil(n_row / BAR_MAX_CELLS)))
     E = np.arange(0, n_row, stride)
     if "bar_counts" in held:   # the gradient curve (R8): both halves' counts pooled as CURVE is (inject._bar_counts), class 0
-        n, gh_p, nb, gb_p = (np.asarray(m, np.float64)[E] for m in held["bar_counts"][0])
+        n, gh_p, nb, gb_p, n_b = (np.asarray(m, np.float64)[E] for m in held["bar_counts"][0])
         has_build = True
         p = np.where(n + nb > 0, (gh_p + gb_p) / np.maximum(n + nb, 1), 0.0)
     else:                      # the plain pooling CURVE is built with (legacy and non-gradient rules)
@@ -268,9 +268,11 @@ def _flux90_halves_bar(completeness: dict, held: dict, reps: int = BAR_REPS, see
     _, inv = np.unique(block, return_inverse=True)
     n_block = int(inv.max()) + 1 if inv.size else 0
     shares, units_cells, units_bad = [], [], []
-    for _ in range(reps):
+    if "bar_counts" not in held:
+        n_b = n                # the plain pooling: both halves drawn at the held half's widening (unchanged)
+    for _ in range(reps):      # each half drawn at its own widening's count, FLUX90 as the code takes it (R8)
         a = f90_of(rng.binomial(n.astype(int), p), n)
-        b = f90_of(rng.binomial(n.astype(int), p), n)
+        b = f90_of(rng.binomial(n_b.astype(int), p), n_b)
         ok = np.isfinite(a) & np.isfinite(b) & (n_pos >= MIN_INJECTIONS)
         with np.errstate(all="ignore"):
             rel = np.abs(a - b) / b

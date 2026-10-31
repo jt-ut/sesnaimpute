@@ -1565,7 +1565,7 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
             e = _bar_counts(edge_W, {k: v[gh_ == g] for k, v in held_r.items()},
                             {k: v[gb_ == g] for k, v in build.items()}, n_loaded)
             both.append(np.where(is_edge[None, :, None], e, both[0]))
-        out["held_bar_counts"] = np.stack(both[1:])           # (class, 4: held n, held got, build n, build got, rows, planes)
+        out["held_bar_counts"] = np.stack(both[1:])  # (class, 5: held n, held got, build n, build got, build own n; rows, planes)
         out["edge_cell"] = is_edge
     fb = np.asarray(tab.data["fallback"]) if (rule.short_rule == "widen" and "fallback" in tab.data) else None
     edge_out = (classes_all[out_rows] // 3) if rule.edge_class else None
@@ -1598,7 +1598,9 @@ def _pool_product(Ws, rec, flux_grid_mjy, sigma_rows, n_row, sigma_out):
 def _bar_counts(Ws, held: dict, build: dict, n_row: int) -> np.ndarray:
     """The C1 bar's counts (checks._flux90_halves_bar) on the pooling `Ws`: per output row and S/N plane the held half's
     pooled injections and recovered, and the build half's, all on the widening the held half chooses (the narrowest
-    holding MIN_INJECTIONS held injections, else the widest). Returns (4, n_out, N_PLANES)."""
+    holding MIN_INJECTIONS held injections, else the widest; the bar's truth p), and fifth the build half's pooled
+    injections on the widening the BUILD half chooses from its own counts (how CURVE takes it). Returns (5, n_out,
+    N_PLANES)."""
     def counts(r):
         key = r["row"].astype(np.int64) * N_PLANES + r["plane"].astype(np.int64)
         t = np.bincount(key, minlength=n_row * N_PLANES).reshape(n_row, N_PLANES).astype(np.float64)
@@ -1608,10 +1610,12 @@ def _bar_counts(Ws, held: dict, build: dict, n_row: int) -> np.ndarray:
     th, gh = counts(held)
     tb, gb = counts(build)
     out = np.stack([Ws[-1] @ m for m in (th, gh, tb, gb)])
+    nb_own = Ws[-1] @ tb
     for W in reversed(Ws[:-1]):
         lv = np.stack([W @ m for m in (th, gh, tb, gb)])
         out = np.where((lv[0] >= MIN_INJECTIONS)[None], lv, out)
-    return out
+        nb_own = np.where(lv[2] >= MIN_INJECTIONS, lv[2], nb_own)
+    return np.concatenate([out, nb_own[None]])
 
 
 def _cell_errors(Ws, flux_grid_mjy, sigma_rows, rec, rule, sigma_out, fallback=None, level_min=None):
@@ -1679,7 +1683,7 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
     n_pos = arr(cl, (n_row,), np.int32, 0)
     tot = arr(cl, (n_row, n_plane), np.float64, 0.0)
     h_curve = arr(cl, (n_row, n_plane), np.float32, 0.0)
-    bar_counts = (np.zeros((2, 4, n_row, N_PLANES)) if "held_bar_counts" in p0 else None)
+    bar_counts = (np.zeros((2, 5, n_row, N_PLANES)) if "held_bar_counts" in p0 else None)
     edge_cell = np.zeros(n_row, bool)
     h_tot = arr(cl, (n_row, n_plane), np.float64, 0.0)
     errs = {k: arr(el, (n_row, n_plane), np.float32, np.nan) for k in ("scatter", "bias")}
