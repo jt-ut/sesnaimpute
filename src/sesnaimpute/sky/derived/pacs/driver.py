@@ -61,6 +61,8 @@ from typing import Dict, List, Optional, Sequence
 
 from sesnaimpute import config as config_module
 from sesnaimpute.definitions import PACS_BANDS as BANDS
+from sesnaimpute.definitions import PACS_CELL_ARCSEC as CELL_ARCSEC
+from sesnaimpute.definitions import PACS_PIXEL_ARCSEC as PIXEL_ARCSEC
 from sesnaimpute.definitions import PACS_MAX_EXTRA_BATCHES as MAX_EXTRA_BATCHES
 from sesnaimpute.sky.derived.pacs import mosaic, stages
 from sesnaimpute.sky.derived.pacs.grid import PixelGrid
@@ -79,6 +81,11 @@ TARGET_MIN = 45.0
 DETECT_LIMIT = "04:00:00"
 #: the least -t of an injection on more than one node (a wide region)
 INJECT_FLOOR = "03:00:00"
+#: `--ahead` (owner 2026-10-31): the whole chain submitted at once, the band jobs afterok the prepare job, so a region waits
+#: in the queue once, not three times. Before detection the round-0 task count is estimated from the band grid's cell
+#: count: tasks per thousand grid cells, Orion A on Stampede3 (3,873 round-0 tasks over 247 Mpx at 1.6" = 702 k cells);
+#: the estimate counts uncovered cells too, so K and the limits err generous (slurm charges elapsed)
+TASKS_PER_KCELL = 3873.0 / 702.0
 #: a region is "small" (phase 1) when its largest band's grid holds fewer pixels than this, in millions. 250, from the
 #: mosaic inventory (2026-10-31, 26 regions): only 3 regions lie under 20 Mpx (IRAS 20050+2720, NGC 7129, S140), and
 #: the nine widest (Ophiuchus 263 ... Cepheus Flare 649 Mpx) lie above 250, so phase 1 is the 18 others, Orion A
@@ -228,6 +235,22 @@ def largest_band_mpx(config, region: str, box: Optional[Sequence[float]] = None)
     return max(sizes) / 1e6
 
 
+def estimated_tasks(config, region: str, box: Optional[Sequence[float]] = None) -> Dict[str, int]:
+    """Per band the estimated round-0 task count before detection (`--ahead`): TASKS_PER_KCELL x the band grid's
+    cells in thousands (grid pixels x (pixel / cell)^2); 0 for a band without maps."""
+    records = read_index(config, region)
+    out = {}
+    for b in BANDS:
+        kept, _dropped = mosaic.input_set(records, b)
+        if not kept:
+            out[b] = 0
+            continue
+        g = PixelGrid.build(kept, b, box)
+        cells = g.ny * g.nx * (PIXEL_ARCSEC[b] / CELL_ARCSEC) ** 2
+        out[b] = int(math.ceil(TASKS_PER_KCELL * cells / 1000.0))
+    return out
+
+
 def _tag(region: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "_", region)
 
@@ -247,9 +270,10 @@ def _detect_done(config, region, box) -> bool:
 
 
 def _chain(config, config_path: str, region: str, system: Optional[System], box=None,
-           tasks: Optional[Dict[str, int]] = None, laptop_jobs: Optional[int] = None) -> List[Job]:
+           tasks: Optional[Dict[str, int]] = None, laptop_jobs: Optional[int] = None, ahead: bool = False) -> List[Job]:
     """The region's jobs for the step it is in (see `chain`). `laptop_jobs`: the laptop form (this interpreter, the
-    local launcher, K = 1, that many workers)."""
+    local launcher, K = 1, that many workers). `ahead`: while detection is not done, the prepare job AND the band jobs
+    (afterok the prepare job, K and limits from `estimated_tasks`) and finish, all in one submission."""
     tag = _tag(region)
     laptop = laptop_jobs is not None
     python = sys.executable if laptop else "python"
@@ -257,10 +281,15 @@ def _chain(config, config_path: str, region: str, system: Optional[System], box=
     w = lambda module, verb, *extra: _words(python, module, verb, config_path, region, box, c, *extra)
     if tasks is None and config is not None and stages._row_state(config, region, box, stages._FINISH).done:
         return []
+    jobs = []
     if tasks is None and (config is None or not _detect_done(config, region, box)):
         commands = tuple(w(STAGES_MODULE, s, "--band", b) for b in BANDS for s in ("mosaic", "psf", "detect"))
-        return [Job("pacs_%s_prepare" % tag, "prepare", "", 1, DETECT_LIMIT, commands, ())]
-    jobs = []
+        prepare = Job("pacs_%s_prepare" % tag, "prepare", "", 1, DETECT_LIMIT, commands, ())
+        if not ahead or config is None:
+            return [prepare]
+        jobs.append(prepare)
+        tasks = estimated_tasks(config, region, box)
+    dep = tuple(j.name for j in jobs)              # the band jobs afterok the prepare job under --ahead
     mapped = {r.band for r in read_index(config, region)} if config is not None else set(BANDS)
     for b in BANDS:
         if b not in mapped:             # no map of the band: its empty pooling record is written by the finish job
@@ -273,7 +302,7 @@ def _chain(config, config_path: str, region: str, system: Optional[System], box=
         launch = ("--launcher", "local") if laptop else ("--launcher", "srun", "--cpus", c)
         jobs.append(Job("pacs_%s_%s" % (tag, b), "band", b, k, limit,
                         (w(DRIVER_MODULE, "inject-band", "--band", b, "--of", k, *launch),
-                         w(DRIVER_MODULE, "pool-band", "--band", b, "--of", k, *launch)), ()))
+                         w(DRIVER_MODULE, "pool-band", "--band", b, "--of", k, *launch)), dep))
     curated = (python, "-W", "ignore", "-m", CURATED_MODULE, config_path, "--regions", region)
     completeness = (python, "-W", "ignore", "-m", COMPLETENESS_MODULE, config_path, "--regions", region)
     empty = tuple(w(STAGES_MODULE, "pool", "--band", b) for b in BANDS if b not in mapped)
@@ -530,6 +559,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--box", type=float, nargs=4, default=None)
     p.add_argument("--out-dir", default=None, help="where the phase files go (default: the system's slurm_dir)")
     p.add_argument("--target-minutes", type=float, default=None)
+    p.add_argument("--ahead", action="store_true",
+                   help="submit each region's whole chain at once: prepare, then the band jobs afterok it (K and limits "
+                        "estimated from the band grids, TASKS_PER_KCELL), then finish; one queue wait per region")
     p.add_argument("--tasks", type=_tasks_arg, default=None,
                    help="P70=N,P100=N,P160=N: round-0 task counts instead of the detect records (writes the rest step; a "
                         "dry run of the sizing)")
@@ -545,7 +577,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for region in a.region:
         mpx = largest_band_mpx(config, region, box)
         phase = "phase1" if mpx < SMALL_MPX else "phase2"
-        jobs = _chain(config, system.config_path, region, system, box, a.tasks)
+        jobs = _chain(config, system.config_path, region, system, box, a.tasks, ahead=a.ahead)
         if not jobs:
             print("%s: finish is done; nothing to submit" % region)
             continue
