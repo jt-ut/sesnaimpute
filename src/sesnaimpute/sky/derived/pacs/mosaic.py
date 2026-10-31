@@ -42,12 +42,14 @@ psf.build_mosaic_psf / psf.MosaicPSF, same results).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
 import shutil
 import warnings
 from collections import OrderedDict
+from types import MappingProxyType
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -603,11 +605,28 @@ def coadd_tile(pixel_grid: PixelGrid, inputs: Sequence["psf.InputMap"], offsets:
     return True
 
 
-def _pass1(pixel_grid, inputs, tiles):
+def _spec(pixel_grid: PixelGrid, header_text: str, inputs) -> tuple:
+    """What a worker needs to rebuild the grid and the input maps: header texts, never pickled WCS objects (astropy
+    pickles a WCS through a 16-digit header, so a pickled WCS is not bit-equal to the one the parent holds; the old
+    strip build also re-read every WCS from its header text in the worker)."""
+    return (header_text, pixel_grid.shape, pixel_grid.box,
+            [(im.record, im.maps_root, im.smooth.directory, im.smooth_step) for im in inputs])
+
+
+def _unspec(spec):
+    header_text, shape, box, maps = spec
+    pixel_grid = PixelGrid.from_header(header_text, shape, None, box)
+    return pixel_grid, [psf.InputMap(r, grid.celestial_wcs(r.wcs_header), root, TiledLayer.open(d, "r"), step)
+                        for r, root, d, step in maps]
+
+
+def _pass1(spec, tiles):
+    pixel_grid, inputs = _unspec(spec)
     return [_overlap_tile(pixel_grid, inputs, iy, ix) for iy, ix in tiles]
 
 
-def _pass2(pixel_grid, inputs, offsets, tiles, layers):
+def _pass2(spec, offsets, tiles, layers):
+    pixel_grid, inputs = _unspec(spec)
     return [coadd_tile(pixel_grid, inputs, offsets, iy, ix, layers) for iy, ix in tiles]
 
 
@@ -698,7 +717,8 @@ def build_mosaic(config, region: str, band: str, box: Optional[Sequence[float]] 
                      for ix in range(bx0 // grid.TILE, (bx1 - 1) // grid.TILE + 1))
     tiles = sorted(tiles)
     # pass 1: valid pixel counts and pairwise differences, tile by tile
-    res = [r for part in pool(delayed(_pass1)(pixel_grid, inputs, c) for c in _chunks(tiles, n_jobs)) for r in part]
+    spec = _spec(pixel_grid, header_text, inputs)
+    res = [r for part in pool(delayed(_pass1)(spec, c) for c in _chunks(tiles, n_jobs)) for r in part]
     npix = {r.path: 0 for r in kept}
     pair_n, pair_vals, pair_first = {}, {}, {}
     for counts, pairs, first in res:
@@ -732,7 +752,7 @@ def build_mosaic(config, region: str, band: str, box: Optional[Sequence[float]] 
         d = os.path.join(outdir, name)
         _assert_inside_derived(config, d)
         layers[name] = TiledLayer.create(d, (ny, nx), np.float32, grid.LAYER_FILL[name], grid.TILE, header_text)
-    pool(delayed(_pass2)(pixel_grid, inputs, offsets, c, layers) for c in _chunks(tiles, n_jobs))
+    pool(delayed(_pass2)(spec, offsets, c, layers) for c in _chunks(tiles, n_jobs))
     for name in LAYERS:
         layers[name].write_index()
     floors = _floors(TiledLayer.open(os.path.join(outdir, "coverage"), "r"), pixel_grid)
@@ -1229,10 +1249,16 @@ class Mosaic:
         self._outer_cache = None
 
     def __getstate__(self):
-        return {"args": self._args}
+        config = self._args[0]
+        fields = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
+        proxies = [k for k, v in fields.items() if isinstance(v, MappingProxyType)]
+        fields.update({k: dict(fields[k]) for k in proxies})        # a mappingproxy does not pickle
+        return {"config": (type(config), fields, proxies), "args": self._args[1:]}
 
     def __setstate__(self, state):
-        self.__init__(*state["args"])
+        cls, fields, proxies = state["config"]
+        fields.update({k: MappingProxyType(fields[k]) for k in proxies})
+        self.__init__(cls(**fields), *state["args"])
 
     # the reader
     def window(self, y0: int, y1: int, x0: int, x1: int) -> Window:
