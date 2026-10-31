@@ -67,6 +67,7 @@ from sesnaimpute.attrs_registry import PACS_COPIED as _PACS_COPIED, REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.catalog import depth_grid as depth_grid_module
 from sesnaimpute.definitions import COMPLETENESS_STORAGE_SCALE as STORAGE_SCALE
+from sesnaimpute.definitions import PACS_GRADIENT_LN_R
 
 #: Measured identical across every one of the survey's 440 cube files
 #: (module docstring): the spectral axis's own step convention, asserted
@@ -717,6 +718,12 @@ _PACS_POINT_BLOCK = 2_000_000
 _PACS_PIXEL_BLOCK = 1000
 
 
+#: the PACS copied tables with one row per CURVE_<B> row (repeated with the gradient rows); the rest are per map
+#: or per plane
+_PACS_PER_ROW = ("CURVE_{b}", "COMPLETED_FROM_{b}", "CELL_ID_{b}", "CELL_MAP_INDEX_{b}", "CELL_MAP_{b}", "CELL_RA_{b}",
+                 "CELL_DEC_{b}", "CELL_SIGMA_{b}_MJY", "CELL_OFFSET_{b}_MJY", "N_POS_{b}", "N_SIGMA_POS_{b}")
+
+
 def _pacs_input_path(config, region):
     return config_module.product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
 
@@ -789,19 +796,50 @@ def _write_pacs_band(f, fin, band, n_source, sample_ra, sample_dec, n_admitted, 
     points are moved to the deepest map's cell (`_PacsBand.rows`), the covered fraction is the
     share of points with a stored cell, and the curve is the mean of those cells' curves (no
     union dilution: a PACS band's own coverage is its covered fraction)."""
-    for tmpl in _PACS_COPIED:
-        name = tmpl.format(b=band)
-        data = fin[name][()]
-        dset = build_module.write_dataset(f, name, data, *REGISTRY[("completeness_sesna_source", name)])
-        if name == "CURVE_%s" % band:
-            dset.attrs["ZERO_POINT_JY"] = fin[name].attrs["ZERO_POINT_JY"]
     k = ALL_BAND_KEYS.index(band)
     pacs_k = PACS_KEYS.index(band)
     in_row = fin["SOURCE_ROW"][:, pacs_k]
     if in_row.shape[0] != n_source:
         raise ValueError("catalog.completeness: the PACS input has %d source rows, this product has %d"
                          % (in_row.shape[0], n_source))
-    source_row[:, k] = in_row
+    # the gradient curve, per source (owner's estimator 2026-10-31): a coverage-edge cell (one whose
+    # CURVE_GRADIENT_<B> row differs from its CURVE_<B> row) is repeated once after the input's rows with the
+    # gradient curve, and a source on such a cell whose |SOURCE_LN_R| exceeds PACS_GRADIENT_LN_R reads that
+    # repeated row; every other source reads its cell's CURVE_<B> row. The readers index CURVE_<B> (and the
+    # other per-row tables, repeated alike) by SOURCE_ROW unchanged.
+    curve_in = fin["CURVE_%s" % band][()]
+    n_cell = curve_in.shape[0]
+    grad_name = "CURVE_GRADIENT_%s" % band
+    if grad_name in fin:
+        grad = fin[grad_name][()]
+        edge = np.flatnonzero((grad != curve_in).any(axis=1)
+                              | (fin["N_POS_GRADIENT_%s" % band][()] != fin["N_POS_%s" % band][()]))
+        ln_r = fin["SOURCE_LN_R"][:, pacs_k]
+    else:
+        grad, edge, ln_r = curve_in, np.zeros(0, np.int64), np.zeros(in_row.shape, np.float32)
+    extra = np.full(n_cell, -1, np.int64)
+    extra[edge] = n_cell + np.arange(edge.size)
+    out_row = np.asarray(in_row, np.int64).copy()
+    has = out_row >= 0
+    with np.errstate(invalid="ignore"):
+        steep = has & (np.abs(ln_r) > PACS_GRADIENT_LN_R)
+    steep[has] &= extra[out_row[has]] >= 0
+    out_row[steep] = extra[out_row[steep]]
+    for tmpl in _PACS_COPIED:
+        name = tmpl.format(b=band)
+        data = fin[name][()]
+        if tmpl in _PACS_PER_ROW:
+            if name == "CURVE_%s" % band:
+                tail = grad[edge]
+            elif name == "N_POS_%s" % band and edge.size:
+                tail = fin["N_POS_GRADIENT_%s" % band][()][edge]
+            else:
+                tail = data[edge]
+            data = np.concatenate([data, tail.astype(data.dtype)])
+        dset = build_module.write_dataset(f, name, data, *REGISTRY[("completeness_sesna_source", name)])
+        if name == "CURVE_%s" % band:
+            dset.attrs["ZERO_POINT_JY"] = fin[name].attrs["ZERO_POINT_JY"]
+    source_row[:, k] = out_row
 
     pb = _PacsBand(fin, band)
     curve = fin["CURVE_%s" % band][()]

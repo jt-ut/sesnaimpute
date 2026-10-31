@@ -3994,11 +3994,22 @@ _PACS_GRADIENT_READINGS = {
     "N_POS_GRADIENT_{b}": ("injections",
         "N_POS_{b} for CURVE_GRADIENT_{b}: the artificial sources behind its value at the faintest plane."),
     "EPS_FLUX_{b}": ("relative flux (a fraction of the source flux; dimensionless)",
-        "The part of a {w} micron source's flux error that grows in proportion to its flux, one row per cell noise class "
-        "(row 0: quiet cells; row 1: noisy cells, CELL_SIGMA_{b}_MJY above 2 times the map's median), columns: the "
+        "The part of a {w} micron source's flux error that grows in proportion to its flux, one row per cell class of "
+        "CELL_CLASS_{b} (row 0: quiet cells; row 1: noisy cells; row 2: crowded cells of low noise), columns: the "
         "value, its 16 and 84 per cent bootstrap bounds over cells, and the number of artificial sources it was fitted "
         "on. A source's flux uncertainty is the square root of (SCATTER_{b}_MJY read at its flux)^2 plus (this value "
         "times its flux)^2."),
+    "FLUX90_ERR_{b}": ("relative (a fraction of the cell's FLUX90; dimensionless)",
+        "Statistical error of FLUX90 from the number of injections pooled and the curve's slope; the fit reads CURVE, not "
+        "FLUX90. It is the binomial error of the recovered fraction at 0.9 for the artificial sources pooled at the "
+        "cell (the build half), divided by how steeply the cell's wider-area curve rises there. Not a number where the "
+        "curve never reaches 0.9. At a cell on the edge of the map's coverage both are taken from the artificial "
+        "sources CURVE_{b} itself is built from there (the edge cells' sources in the flat part of the coverage)."),
+    "CELL_CLASS_{b}": ("class code (0, 1 or 2)",
+        "The cell's class for the {w} micron flux errors: 0 quiet (neither noisy nor crowded); 1 noisy (CELL_SIGMA_{b}_MJY "
+        "above 2 times the map's median, whether crowded or not); 2 crowded (not noisy, and more PACS detections of "
+        "this band within 120 arcsec of the cell centre than 90 per cent of the map's cells have). A cell's SCATTER_{b}_MJY and BIAS_{b}_MJY pool only cells of its "
+        "own class, and EPS_FLUX_{b} holds one row per class."),
 }
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_u, _r) in _PACS_GRADIENT_READINGS.items():
@@ -4283,10 +4294,24 @@ REGISTRY[("sources_sesna_source", "ORIGIN_FNU")] = ("code",
     "covered -- no completeness value and no non-detection term (COMPLETENESS_2026-10-20.md rule 2, the same "
     "meaning Pokhrel et al. 2023, eHOPS I, ApJS 266, 32, gave the old catalogue column)." + _PACS_TAIL)
 # Unit 3: completeness_sesna_source grows to eleven bands (P70, P100, P160 copied from the PACS input)
+_PACS_SESNA_PER_ROW = ("CURVE_{b}", "COMPLETED_FROM_{b}", "CELL_ID_{b}", "CELL_MAP_INDEX_{b}", "CELL_MAP_{b}",
+                       "CELL_RA_{b}", "CELL_DEC_{b}", "CELL_SIGMA_{b}_MJY", "CELL_OFFSET_{b}_MJY", "N_POS_{b}",
+                       "N_SIGMA_POS_{b}")
+_PACS_GRADIENT_ROWS = (" In this file the cells near a coverage gradient (those whose curve for positions near the gradient "
+                       "differs from the curve of their other positions) appear twice: first among the cells, with the "
+                       "curve of the positions away from the gradient, and again after all the cells, with the curve of "
+                       "the positions near it (and that curve's count in N_POS_%s). A source points (SOURCE_ROW) to the "
+                       "second row when the coverage around it differs from its cell's mean coverage by more than 3 per "
+                       "cent (see the PACS completeness file's SOURCE_LN_R); every other column of the repeated row is "
+                       "the cell's own. The %s rows read through SOURCE_ROW are the curve each source's own position "
+                       "has; PIXEL_CURVE_%s uses the first rows only.")
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _tmpl in PACS_COPIED:
         _name = _tmpl.format(b=_band)
         REGISTRY[("completeness_sesna_source", _name)] = REGISTRY[("completeness_pacs_source", _name)]
+        if _tmpl in _PACS_SESNA_PER_ROW:
+            _u, _r = REGISTRY[("completeness_sesna_source", _name)]
+            REGISTRY[("completeness_sesna_source", _name)] = (_u, _r + _PACS_GRADIENT_ROWS % (_band, _band, _band))
     REGISTRY[("completeness_sesna_source", "PIXEL_CURVE_%s" % _band)] = (
         "dimensionless (completeness fraction, 0..1)",
         "For each admitted nside-512 pixel in HPX_PIX_512, the %s micron completeness curve at "

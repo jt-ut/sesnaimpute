@@ -121,6 +121,10 @@ def _band_arrays(b: BandCompleteness) -> dict:
         e = b.eps_flux
         extra["eps_flux"] = np.array([[e[c], e[c + "_lo"], e[c + "_hi"], e[c + "_n"]] for c in inject.FLUX_TERM_CLASSES],
                                      np.float64)
+        # owner 2026-10-31 ~13:00: the achieved FLUX90 sampling error and the cell class, under the non-legacy estimator
+        extra["flux90_err"] = (np.asarray(b.flux90_err, np.float32) if b.flux90_err is not None
+                               else np.full(n_row, np.nan, np.float32))
+        extra["cell_class"] = np.asarray(b.cell_class if b.cell_class is not None else inject.cell_classes(det), np.int8)
     return dict(extra, curve=curve, source_row=np.asarray(det.src_row).astype(np.int32), envelope=envelope, n_pos=n_pos,
                 n_sigma=np.asarray(cells.n_sigma).astype(np.int16), flux90=f90, bias=b.bias, scatter=b.scatter,
                 sky_bin=np.asarray(det.cell_bin).astype(np.int8), cell_m_sigma=cells.m_sigma, cell_m_offset=cells.m_offset,
@@ -190,6 +194,9 @@ def write_completeness(path: str, region: str, mag: np.ndarray, bands: Dict[str,
                 w("N_POS_GRADIENT_" + b, d["n_pos_gradient"])
             if "eps_flux" in d:
                 w("EPS_FLUX_" + b, d["eps_flux"]).attrs["CLASSES"] = np.array(inject.FLUX_TERM_CLASSES, dtype="S")
+            if "flux90_err" in d:
+                w("FLUX90_ERR_" + b, d["flux90_err"])
+                w("CELL_CLASS_" + b, d["cell_class"]).attrs["CLASSES"] = np.array(inject.CELL_CLASSES, dtype="S")
         w = lambda name, data: build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)])
         w("SOURCE_ROW", np.stack([np.asarray(bands[b].detection.src_row) for b in BANDS], axis=1).astype(np.int32))
         if source_ln_r is not None:
@@ -352,7 +359,8 @@ def read_completeness_band(path: str, band: str) -> dict:
                  source_row=g("SOURCE_ROW")[:, BANDS.index(band)])
         d["r_match"] = float(np.nanmedian(f["MAP_R_MATCH_%s_ARCSEC" % band][:]))
         for key, name in (("curve_gradient", "CURVE_GRADIENT_" + band), ("flux90_gradient", "FLUX90_GRADIENT_%s_MJY" % band),
-                          ("eps_flux", "EPS_FLUX_" + band)):
+                          ("eps_flux", "EPS_FLUX_" + band), ("flux90_err", "FLUX90_ERR_" + band),
+                          ("cell_class", "CELL_CLASS_" + band)):
             if name in f:
                 d[key] = f[name][:]
         zero_point = float(f["CURVE_" + band].attrs["ZERO_POINT_JY"])

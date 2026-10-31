@@ -98,8 +98,13 @@ BAR_SEED = 1
 C2_BAR = (0.90, 1.10)
 C2_MIN_RESIDUALS = 200
 C2_BIAS_BAR_PERCENT = 1.0
-#: a cell is noisy where its CELL_SIGMA exceeds this multiple of its map's median
+#: a cell is noisy where its CELL_SIGMA exceeds this multiple of its map's median (products without CELL_CLASS only)
 C2_NOISY_FACTOR = 2.0
+#: owner 2026-10-31 ~13:00: a C2 row passes where |ratio - 1| <= max(C2_BAR half-width, C2_SAMPLING_K x
+#: C2_SAMPLING_SD / sqrt(n)): the bar widened by the sampling error of a 1.4826-MAD scatter of n Gaussian residuals
+#: (sd 1.16 / sqrt(n) relative), 2.5 of it; rows with n < C2_MIN_RESIDUALS stay INFO
+C2_SAMPLING_SD = 1.16
+C2_SAMPLING_K = 2.5
 #: the gradient class: |ln r| above this, r = aperture-box coverage / cell coverage (FIX_SPEC sec 12)
 GRADIENT_LN_R = 0.03
 #: detection report (RULINGS_5): recovery of held-out injections at S/N >= 20 is at least 0.99; sky bins of the floor
@@ -206,9 +211,10 @@ def _counts(row, plane, recovered, n_row, n_x):
 def _flux90_halves_bar(completeness: dict, held: dict, reps: int = BAR_REPS, seed: int = BAR_SEED) -> Tuple[float, float, float, int]:
     """The derived bar of the C1 FLUX90 share (science/M5_c1_bar.md sec 3): bar = S_hat - 2 sigma, from the map's OWN
     stored pooled counts and curves. Per (cell, S/N plane) the truth p is the pooled recovered fraction of both halves on the
-    widening the held half chose (the build half's records, `held` carrying build_row/build_plane/build_recovered; without them the held half alone
+    widening the held half chose (under the gradient curve each half has its own truth: p_h on the held half's chosen pool,
+    p_b on the build half's, both halves' records pooled on that pool; equal where the halves choose the same pool) (the build half's records, `held` carrying build_row/build_plane/build_recovered; without them the held half alone
     roughens the curves, S_hat falls and a bar from it would be lenient, so there is no bar: only S_hat), the two halves are drawn Binomial(n, p)/n
-    (n the held half's pooled count), read at F / CELL_SIGMA and FLUX90 taken as the code takes it; S_hat = 100 x (1 - mean
+    (n the held half's pooled count; under the gradient curve each half's count on the widening it chooses from its own counts, as CURVE is taken), read at F / CELL_SIGMA and FLUX90 taken as the code takes it; S_hat = 100 x (1 - mean
     over cells of P[|FLUX90_A - FLUX90_B| / FLUX90_B > 10 %]) over `reps` draws; sigma = the standard deviation of that share
     over a bootstrap of the map's (block, repetition) units, BAR_BLOCK_ARCSEC blocks, drawn until the map's cell count is reached
     (the realised share of one split, not the expected one, is what the measured share is). Returns (bar, S_hat,
@@ -217,31 +223,37 @@ def _flux90_halves_bar(completeness: dict, held: dict, reps: int = BAR_REPS, see
     n_x = snr.size
     flux90 = inject.flux90
     n_row = completeness["curve"].shape[0]
-    Ws = _pool_matrices(completeness["centres"])
     stride = max(1, int(np.ceil(n_row / BAR_MAX_CELLS)))
     E = np.arange(0, n_row, stride)
-    WE = [W[E] for W in Ws]
-    th, gh = _counts(held["row"], held["plane"], held["recovered"].astype(bool), n_row, n_x)
-    has_build = "build_row" in held
-    if has_build:
-        tb, gb = _counts(held["build_row"], held["build_plane"], held["build_recovered"].astype(bool), n_row, n_x)
-    chosen = np.full((E.size, n_x), len(WE) - 1)
-    for i in reversed(range(len(WE) - 1)):
-        chosen = np.where(WE[i] @ th >= MIN_INJECTIONS, i, chosen)
-
-    def pick(M):
-        arr = [W @ M for W in WE]
-        out = arr[-1].copy()
+    if "bar_counts" in held:   # the gradient curve (R8): both halves' counts pooled as CURVE is (inject._bar_counts), class 0
+        n, gh_p, nb, gb_p, th_o, gh_o, n_b, gb_o = (np.asarray(m, np.float64)[E] for m in held["bar_counts"][0])
+        has_build = True
+        p = np.where(n + nb > 0, (gh_p + gb_p) / np.maximum(n + nb, 1), 0.0)            # the held half's pool's truth
+        p_b = np.where(th_o + n_b > 0, (gh_o + gb_o) / np.maximum(th_o + n_b, 1), 0.0)  # the build half's pool's truth
+    else:                      # the plain pooling CURVE is built with (legacy and non-gradient rules)
+        Ws = _pool_matrices(completeness["centres"])
+        WE = [W[E] for W in Ws]
+        th, gh = _counts(held["row"], held["plane"], held["recovered"].astype(bool), n_row, n_x)
+        has_build = "build_row" in held
+        if has_build:
+            tb, gb = _counts(held["build_row"], held["build_plane"], held["build_recovered"].astype(bool), n_row, n_x)
+        chosen = np.full((E.size, n_x), len(WE) - 1)
         for i in reversed(range(len(WE) - 1)):
-            out = np.where(chosen == i, arr[i], out)
-        return out
+            chosen = np.where(WE[i] @ th >= MIN_INJECTIONS, i, chosen)
 
-    n = pick(th)
-    if has_build:
-        nb = pick(tb)
-        p = np.where(n + nb > 0, (pick(gh) + pick(gb)) / np.maximum(n + nb, 1), 0.0)
-    else:                      # the held half alone roughens the truth, S_hat falls and the bar would be lenient: S_hat only
-        p = np.where(n > 0, pick(gh) / np.maximum(n, 1), 0.0)
+        def pick(M):
+            arr = [W @ M for W in WE]
+            out = arr[-1].copy()
+            for i in reversed(range(len(WE) - 1)):
+                out = np.where(chosen == i, arr[i], out)
+            return out
+
+        n = pick(th)
+        if has_build:
+            nb = pick(tb)
+            p = np.where(n + nb > 0, (pick(gh) + pick(gb)) / np.maximum(n + nb, 1), 0.0)
+        else:                  # the held half alone roughens the truth, S_hat falls and the bar would be lenient: S_hat only
+            p = np.where(n > 0, pick(gh) / np.maximum(n, 1), 0.0)
     sigma = completeness["sigma"][E].astype(np.float64)
     flux = completeness["flux"]
     k0, w = _snr_brackets(sigma, flux)
@@ -258,9 +270,11 @@ def _flux90_halves_bar(completeness: dict, held: dict, reps: int = BAR_REPS, see
     _, inv = np.unique(block, return_inverse=True)
     n_block = int(inv.max()) + 1 if inv.size else 0
     shares, units_cells, units_bad = [], [], []
-    for _ in range(reps):
+    if "bar_counts" not in held:
+        n_b, p_b = n, p        # the plain pooling: both halves drawn at the held half's widening (unchanged)
+    for _ in range(reps):      # each half drawn from its own widening's pool: its count and that pool's truth (R9)
         a = f90_of(rng.binomial(n.astype(int), p), n)
-        b = f90_of(rng.binomial(n.astype(int), p), n)
+        b = f90_of(rng.binomial(n_b.astype(int), p_b), n_b)
         ok = np.isfinite(a) & np.isfinite(b) & (n_pos >= MIN_INJECTIONS)
         with np.errstate(all="ignore"):
             rel = np.abs(a - b) / b
@@ -292,14 +306,21 @@ def completeness_c1(band: str, completeness: dict, held: dict) -> List[CheckRow]
     Of the (cell, flux plane) on the curve's transition (either half between 0.02 and 0.98) with at least MIN_INJECTIONS
     held-out injections behind them, the share whose difference lies within the combined 1-sigma binomial error of the two
     halves (>= 60 %), within 2 sigma (>= 93 %), within 0.03 absolute (information); and the share of cells whose FLUX90 of the
-    two halves agree within 10 %, against the bar derived from the map's own counts (`_flux90_halves_bar`)."""
+    two halves agree within 10 %, against the bar derived from the map's own counts (`_flux90_halves_bar`). The held half is
+    pooled exactly as CURVE: under the gradient curve `held` carries it from inject.pool_block (curve, curve_total,
+    bar_counts, edge_cell: an edge cell's class-0 edge pool), and CURVE_GRADIENT gets the information rows C1_GRADIENT_*;
+    otherwise CURVE's plain pooling is rebuilt here."""
     d = completeness
     curve_on_flux_grid = inject.curve_on_flux_grid
     flux90 = inject.flux90
     n_row, n_plane = d["curve"].shape
-    Ws = _pool_matrices(d["centres"])
-    fh, tot = curve_on_flux_grid(Ws, held["row"].astype(np.int64), held["plane"].astype(np.int64), held["recovered"].astype(bool),
-                                 d["sigma"], d["flux"], n_row)
+    gradient = np.ndim(held.get("curve")) == 3
+    if gradient:               # R8: the held half pooled exactly as CURVE (an edge cell: the class-0 edge pool), from pool_block
+        fh, tot = held["curve"][0].astype(np.float64), np.asarray(held["curve_total"][0], np.float64)
+    else:                      # CURVE's own (plain) pooling
+        Ws = _pool_matrices(d["centres"])
+        fh, tot = curve_on_flux_grid(Ws, held["row"].astype(np.int64), held["plane"].astype(np.int64),
+                                     held["recovered"].astype(bool), d["sigma"], d["flux"], n_row)
     fb = d["curve"].astype(float) / STORAGE_SCALE
     transition = (((fh > C1_TRANSITION[0]) & (fh < C1_TRANSITION[1])) | ((fb > C1_TRANSITION[0]) & (fb < C1_TRANSITION[1])))
     use = (tot >= MIN_INJECTIONS) & (d["n_pos"][:, None] >= MIN_INJECTIONS) & transition
@@ -340,6 +361,20 @@ def completeness_c1(band: str, completeness: dict, held: dict) -> List[CheckRow]
                          detail="median difference of FLUX90 between the halves, per cent", n=int(ok.sum()), info=True))
     else:
         rows.append(_row("C1_FLUX90_HALVES_SHARE", band, NAN, detail="no cells with FLUX90 in both halves", n=0, info=True))
+    if gradient and "curve_gradient" in d and "edge_cell" in held:
+        # information: CURVE_GRADIENT (edge cells, |ln r| class 1) against the held half's class-1 edge pool, same reading
+        e = np.asarray(held["edge_cell"], bool)[:, None]
+        fh1, tot1 = held["curve"][1].astype(np.float64), np.asarray(held["curve_total"][1], np.float64)
+        fb1 = d["curve_gradient"].astype(float) / STORAGE_SCALE
+        tr1 = (((fh1 > C1_TRANSITION[0]) & (fh1 < C1_TRANSITION[1])) | ((fb1 > C1_TRANSITION[0]) & (fb1 < C1_TRANSITION[1])))
+        use1 = e & (tot1 >= MIN_INJECTIONS) & tr1
+        d1 = np.abs(fb1 - fh1)
+        s1 = np.hypot(_binomial_error(fh1, tot1), _binomial_error(fb1, tot1))
+        n1 = int(use1.sum())
+        for k, name in ((1, "C1_GRADIENT_WITHIN_1SIGMA"), (2, "C1_GRADIENT_WITHIN_2SIGMA")):
+            v = 100.0 * (use1 & (d1 <= k * s1)).sum() / n1 if n1 else NAN
+            rows.append(_row(name, band, v, detail="CURVE_GRADIENT at the edge cells vs the held half's class-1 edge pool, "
+                             "share within %d sigma (information)" % k, n=n1, info=True))
     return rows
 
 
@@ -367,8 +402,12 @@ def completeness_c2(band: str, completeness: dict, held: dict) -> List[CheckRow]
     flux = held["flux"].astype(np.float64)
     median_sigma = np.array([np.median(d["sigma"][d["cell_map"] == m]) if (d["cell_map"] == m).any() else np.nan
                              for m in range(d["map_id"].size)])
-    noisy = d["sigma"] > C2_NOISY_FACTOR * median_sigma[d["cell_map"]]
-    classes = [("quiet", ~noisy[row]), ("noisy", noisy[row])]
+    if "cell_class" in d:                    # CELL_CLASS_<B>: quiet / noisy / crowded = low-noise crowded (owner 2026-10-31 14:33)
+        cc = np.asarray(d["cell_class"], np.int64)
+        classes = [(name, cc[row] == c) for c, name in enumerate(inject.CELL_CLASSES)]
+    else:
+        noisy = d["sigma"] > C2_NOISY_FACTOR * median_sigma[d["cell_map"]]
+        classes = [("quiet", ~noisy[row]), ("noisy", noisy[row])]
     if "lnr" in held:
         with np.errstate(invalid="ignore"):
             classes.append(("gradient", np.abs(np.asarray(held["lnr"], float)) > GRADIENT_LN_R))
@@ -377,7 +416,8 @@ def completeness_c2(band: str, completeness: dict, held: dict) -> List[CheckRow]
     s_build = np.full(row.size, np.nan)
     s_build[ap] = _at_injected_flux(e["scatter"], d["flux"], row[ap], flux[ap])
     # the same SIGMA the products give a detection: with the flux-proportional term where the build fitted one
-    eps = inject.eps_rows(held.get("eps_flux"), d["sigma"])
+    eps = inject.eps_rows(held.get("eps_flux"), d["cell_class"] if "cell_class" in d
+                          else np.zeros(d["sigma"].size, np.int64))
     s_build[ap] = inject.flux_sigma(s_build[ap], eps[row[ap]], flux[ap])
     rows: List[CheckRow] = []
     n_nan = int(np.sum(ap & ~np.isfinite(s_build)))
@@ -391,9 +431,12 @@ def completeness_c2(band: str, completeness: dict, held: dict) -> List[CheckRow]
                 z = residual[sel] / s_build[sel]
                 value = _robust(z)
                 name = "C2_%s_%s_BIN%d" % (prefix, label.upper(), j)
-                detail = "normalised scatter of the held-out residuals; expected 1.02 +/- 0.05"
-                if sel.sum() >= C2_MIN_RESIDUALS:
-                    rows.append(_row(name, band, value, C2_BAR[0], C2_BAR[1], detail, n=int(sel.sum())))
+                n = int(sel.sum())
+                half = max(0.5 * (C2_BAR[1] - C2_BAR[0]), C2_SAMPLING_K * C2_SAMPLING_SD / np.sqrt(max(n, 1)))
+                detail = ("normalised scatter of the held-out residuals; expected 1.02 +/- 0.05; bar 1 +/- max(0.10, "
+                          "2.5 x 1.16 / sqrt(n)) = 1 +/- %.3f" % half)
+                if n >= C2_MIN_RESIDUALS:
+                    rows.append(_row(name, band, value, 1.0 - half, 1.0 + half, detail, n=n))
                 else:
                     rows.append(_row(name, band, value, detail="fewer than %d residuals" % C2_MIN_RESIDUALS, n=int(sel.sum()), info=True))
 

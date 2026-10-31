@@ -224,6 +224,9 @@ PACS_CELL_ARCSEC = 30.0
 #: own; where the pooled count is still short of MIN_INJECTIONS the radius is widened to 2 x, then 3 x
 PACS_POOL_ARCSEC = 120.0
 PACS_POOL_WIDENINGS = (1, 2, 3)
+#: the coverage-gradient class boundary of the PACS completeness (owner's estimator 2026-10-31): an artificial or real
+#: source whose |ln r| (r = its aperture box's mean coverage over its cell's) exceeds this reads the gradient curve
+PACS_GRADIENT_LN_R = 0.03
 PACS_MIN_INJECTIONS = 100
 #: rounds of extra injection batches after the first, at most (the round rule of the injection stage)
 PACS_MAX_EXTRA_BATCHES = 40
