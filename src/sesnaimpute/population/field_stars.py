@@ -89,6 +89,7 @@ from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.sky.download.trilegal import build as trilegal_download
 
@@ -402,27 +403,46 @@ def distance_pc(df):
 # retention: the region's deepest limits, two of eight undimmed
 # ---------------------------------------------------------------------------
 
-def detection_probability(flux, reader):
+def region_envelopes(config, region):
+    """`{band: (curve, g0, dm, n, a, c)}`: the region's own ENVELOPE_<band>
+    curve and its grid parameters for each of the eight bands, read once
+    from `catalog.limits.completeness`'s reader in the parent and the file
+    closed -- a few kB in all, so a worker never opens the region's
+    completeness product nor holds its per-source tables (SOURCE_ROW etc.,
+    ~430 MB for Cygnus X, once per worker: the 2026-10-30 Vista job 1111139
+    hit its 225 GB ceiling here with 144 workers)."""
+    reader = limits_module.completeness(config, region)
+    out = {}
+    for band in BAND_KEYS:
+        g0, dm = reader._grid_params(band)
+        a, c = reader._ac[band]
+        curve = np.asarray(reader._envelope[band])
+        out[band] = (curve, g0, dm, curve.shape[0], a, c)
+    reader._f.close()
+    return out
+
+
+def detection_probability(flux, envelopes):
     """`(n, 8)`: the detection probability of each star in `flux` (n, 8,
     `BAND_KEYS` order), per band -- Rob Gutermuth's own measured curve,
     POSITION-INDEPENDENT (module docstring: no synthetic star carries a
     sky position of its own): every one of the eight bands' own region-
-    wide ENVELOPE curve (`reader.envelope_fraction`, the max over every
+    wide ENVELOPE curve (`region_envelopes`; the same curve and kernel
+    `catalog.limits.Completeness.envelope_fraction` reads, the max over every
     pixel of the measured curve, clamped to the curve's own first plane
     brightward and to 0 beyond its own last measured plane, no width-
     model margin -- COMPLETENESS_2026-10-20.md: "the curve is used AS
     MEASURED"); 2MASS's own ENVELOPE curve is the max over its own
     nside-128 pixels' fits, the SAME construction as the five Spitzer
     bands (briefs/round4_2026-10-20/C6_twomass_pixel_depths.md), so no
-    band-specific branch is needed here any more -- `catalog.limits.
-    completeness`'s reader object, the one place this module reads a
-    STORED completeness product.
+    band-specific branch is needed here any more.
     """
     flux = np.asarray(flux, dtype=np.float64)
     n = flux.shape[0]
     out = np.zeros((n, len(BAND_KEYS)), dtype=np.float64)
     for j, band in enumerate(BAND_KEYS):
-        out[:, j] = reader.envelope_fraction(band, flux[:, j])
+        curve, g0, dm, n_grid, a, c = envelopes[band]
+        out[:, j] = completeness_module.completeness(curve, g0, dm, n_grid, np.log10(flux[:, j]), a, c)
     return out
 
 
@@ -439,23 +459,7 @@ def passes_two_of_eight(prob, min_bands=RETENTION_MIN_BANDS):
 # per-region build
 # ---------------------------------------------------------------------------
 
-#: One `catalog.limits.completeness` reader per worker process (its own
-#: open h5py file is not shared across a process boundary, `catalog.
-#: limits.completeness`'s own docstring), built lazily on first use and
-#: cleared on region change -- the same per-process cache pattern
-#: `bmstp.sample_star._cached_profile` uses.
-_READER_CACHE = {}
-
-
-def _cached_reader(config, region):
-    key = (config.data_root, region)
-    if key not in _READER_CACHE:
-        _READER_CACHE.clear()  # one region's reader per worker at a time
-        _READER_CACHE[key] = limits_module.completeness(config, region)
-    return _READER_CACHE[key]
-
-
-def _process_block(piece, config, region, flux, log_teff, logg, mh, log_l, ks_mag, dist_pc,
+def _process_block(piece, envelopes, flux, log_teff, logg, mh, log_l, ks_mag, dist_pc,
                     pointing_index, atmosphere, colour_table):
     """One block of this pointing's own stars (COMMON.md 2026-10-19
     ruling: the piece is a block of synthetic stars, not a pointing --
@@ -492,8 +496,7 @@ def _process_block(piece, config, region, flux, log_teff, logg, mh, log_l, ks_ma
     g_minus_ks_table, colour_matched = lookup_colour(log_teff_b, logg_b, mh_b, colour_table)
     g_minus_ks = np.where(colour_matched, g_minus_ks_table, atmosphere["g_minus_ks"][idx])
     g_proxy = ks_b + g_minus_ks
-    reader = _cached_reader(config, region)
-    prob = detection_probability(flux_b, reader)
+    prob = detection_probability(flux_b, envelopes)
     keep = passes_two_of_eight(prob)
 
     raw = dict(
@@ -528,6 +531,7 @@ def build_region(config, region, atmosphere, colour_table, n_jobs, st=None):
     """
     specs, _centers, area_deg2, n_pointings_grid, n_pointings_on_disk = _region_pointing_plan(config, region)
     trilegal_dir = f"{config.data_root}/sky/download/trilegal"
+    envelopes = region_envelopes(config, region)
 
     raw_parts, ret_parts = [], []
     n_raw = 0
@@ -552,7 +556,7 @@ def build_region(config, region, atmosphere, colour_table, n_jobs, st=None):
         del df_p  # the ascii frame is not needed past this pointing's own columns
 
         fn = functools.partial(
-            _process_block, config=config, region=region, flux=flux, log_teff=log_teff, logg=logg, mh=mh,
+            _process_block, envelopes=envelopes, flux=flux, log_teff=log_teff, logg=logg, mh=mh,
             log_l=log_l, ks_mag=ks_mag, dist_pc=dist_pc, pointing_index=pointing_index,
             atmosphere=atmosphere, colour_table=colour_table)
         # the per-star cost here is uniform (no row costs more than
