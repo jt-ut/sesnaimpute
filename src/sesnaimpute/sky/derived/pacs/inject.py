@@ -28,9 +28,9 @@ CELL_SIGMA. How cells pool is a PARAMETER, `PoolingRule` (FIX_SPEC.md sec 8 and 
                    2), "window_gradient" (window, and the injections split by their own |ln r| <= / > 0.03, r = the
                    aperture box's mean coverage over the cell's mean coverage: two SCATTER/BIAS per cell)
   short_cell_rule  "nan" (main's: SCATTER NaN where x3 holds fewer than MIN_INJECTIONS far injections on a plane), "widen"
-                   (keep widening x4, x5, ... inside the class until MIN_INJECTIONS; when the class over the whole map
-                   cannot reach it, the class over the map with what it holds (>= CLASS_MAP_MIN); below that the edge
-                   class over the map without the noise window, then the whole map: never NaN)
+                   (keep widening x4, x5, ... inside the class until MIN_INJECTIONS; when no factor reaches it, the
+                   all-cell pool: the edge class over the map without the noise window where the rule has an edge
+                   class, else the whole map; never NaN, never a dropped read)
   curve_class      "cell" (main's), "gradient" (two curves per coverage-edge cell, its injections split by |ln r| <= / >
                    0.03, read by the source's own r; other cells carry their cell curve in both)
 
@@ -113,9 +113,9 @@ DETECTION_SNR = 5.0
 NOISE_WINDOW = 1.5
 EDGE_RATIO = 2.0
 GRADIENT_BOUNDARY = 0.03
-#: the "widen" rule's class over the whole map is accepted with fewer than MIN_INJECTIONS far injections, down to
-#: this many (a median and a MAD need two values); below it the map-wide values of the table are used
-CLASS_MAP_MIN = 2
+#: the all-cell pool is used with fewer than MIN_INJECTIONS far injections only when the whole map holds fewer (a
+#: median and a MAD need two values); never reached on the gate set
+MAP_MIN = 2
 #: the S/N planes pooled (36)
 N_PLANES = int(round((SNR_LOG_MAX - SNR_LOG_MIN) / SNR_LOG_STEP)) + 1
 
@@ -301,6 +301,11 @@ class Injector:
         self.valid_fraction = 1.0
         self.valid_fraction = (float(self._valid(*self._draw(np.random.default_rng(0), np.arange(n), 20000)).mean())
                                if n else 0.0)
+
+    @property
+    def n_rows(self) -> int:
+        """The band's rows (covered cells)."""
+        return int(self.ids.size)
 
     # -- positions
     def _draw(self, rng, rows, n):
@@ -820,6 +825,13 @@ def _map_fallbacks(table: dict, sigma: np.ndarray, cov: np.ndarray) -> np.ndarra
     return out
 
 
+def held_and_stats(detection: BandDetection, records_dir: str) -> Tuple[dict, dict]:
+    """(held-out half, statistics) of a band, what `assemble_band` takes: the record table built when absent
+    (`build_table` with the band's CELL_SIGMA, so the "widen" rule's map-wide values are present), then read."""
+    build_table(records_dir, np.asarray(detection.cells.ids).size, detection.cells.sigma)
+    return read_held(records_dir)
+
+
 def read_held(records_dir: str) -> Tuple[dict, dict]:
     """(held-out half, statistics) of a band from its record table (`build_table`): what `assemble_band` takes
     (contract change: public; the old held/meta came from meta.pkl)."""
@@ -887,6 +899,16 @@ def _open_table(records_dir: str, n_row: int, sigma: Optional[np.ndarray] = None
 # pooling and the estimator
 
 POOLING_CLASSES = ("none", "window", "window_edge", "window_gradient")
+#: PRODUCTION estimator (owner's ruling 2026-10-31): pool only cells with CELL_SIGMA within x1.5 of the target's
+#: (the window restores the ruled calibration of noisy cells on their own residuals, FIX_SPEC sec 8, 12); the
+#: coverage-edge class is NOT used (measured to add <= 0.013 to the noisy-bin scatter ratio)
+PRODUCTION_POOLING_CLASS = "window"
+#: PRODUCTION short-cell rule (owner 2026-10-31): widen inside the window until MIN_INJECTIONS, else the all-cell pool;
+#: SCATTER is never NaN and the acceptance never drops a read (FIX_SPEC sec 12 item 2)
+PRODUCTION_SHORT_CELL_RULE = "widen"
+#: PRODUCTION curve (owner 2026-10-31): two curves per coverage-edge cell by |ln r| <= / > 0.03, each source read on
+#: its own r (M3: recovery depends on |ln r| in edge cells, -0.10 at the transition); other cells one curve
+PRODUCTION_CURVE_CLASS = "gradient"
 SHORT_RULES = ("nan", "widen")
 CURVE_CLASSES = ("cell", "gradient")
 
@@ -897,8 +919,8 @@ class PoolingRule:
     `noise_window` (pool only cells with CELL_SIGMA within x this of the target's; None = no window), `edge_class`
     (pool coverage-edge cells -- within-cell coverage max/min > `edge_ratio` -- only with edge cells), `short_rule`
     ("nan": SCATTER NaN where short, main's; "widen": widen beyond the last widening inside the class until
-    min_injections; the class over the whole map with what it holds (>= CLASS_MAP_MIN); then the edge class over the
-    map without the window, then the whole map), `gradient_class`
+    min_injections; when no factor reaches it, the all-cell pool (the edge class over the map without the window
+    where the rule has an edge class, else the whole map)), `gradient_class`
     (the errors' injections split by |ln r| <= / > `gradient_boundary`: two SCATTER/BIAS per cell), `curve_class`
     ("cell", main's; "gradient": two curves per coverage-edge cell by |ln r|). The three named parameters of the
     brief map onto these fields through `named` (contract change: gradient_class, gradient_boundary, curve_class and
@@ -931,6 +953,12 @@ class PoolingRule:
                    edge_class=pooling_class == "window_edge", edge_ratio=EDGE_RATIO, short_rule=short_cell_rule,
                    gradient_class=pooling_class == "window_gradient", gradient_boundary=GRADIENT_BOUNDARY,
                    curve_class=curve_class)
+
+    @classmethod
+    def production(cls) -> "PoolingRule":
+        """The owner's ruled estimator (PRODUCTION_*): window, widen, gradient curve. `legacy()` stays for the
+        identity gate only."""
+        return cls.named(PRODUCTION_POOLING_CLASS, PRODUCTION_SHORT_CELL_RULE, PRODUCTION_CURVE_CLASS)
 
     @property
     def is_legacy(self) -> bool:
@@ -1106,7 +1134,7 @@ def error_on_flux_grid(Ws: list, row: np.ndarray, plane: np.ndarray, dflux: np.n
     per S/N plane, on the narrowest of `Ws` holding rule.min_injections records (the rule's ladder: under "widen" the
     caller passes the extended ladder, `pool_block`), read at F / the output row's CELL_SIGMA and times it; beyond the
     grid's brightest S/N in proportion to the flux. `level_min`: the count each level needs (default rule.min_injections
-    for every level; the "widen" rule's class-over-the-map level takes CLASS_MAP_MIN). Where no level holds enough:
+    for every level). Where no level holds enough:
     `fallback` (median, scatter) per (output row, S/N plane) (the "widen" rule's map-wide values), else NaN. Contract
     change: `fallback` and `level_min` are added keywords.
     Identity (legacy rule): `error_on_flux_grid` + `pooled_median_scatter` bit-identical."""
@@ -1180,10 +1208,8 @@ def _ladder_extension(bc: _BandCells, out_rows: np.ndarray, short: np.ndarray, c
                       rule: PoolingRule) -> Tuple[list, dict]:
     """The levels beyond the rule's widenings for the output rows short on some plane (`short` (n_out, n_planes), any
     record set of `counts`): x(w+1), x(w+2), ... inside the class (and noise window) until every short plane of the row
-    reaches min_injections in every set, or the radius spans the map: that last level is the class over the whole map,
-    accepted down to CLASS_MAP_MIN injections (FIX_SPEC sec 12: "pool the class over the map"). Returns ([csr (n_out,
-    n_row) per level], statistics: rows completed at each level, rows taking the class over the map, rows left to the
-    map-wide fallbacks). A level's matrix holds rows only for the rows still short when it is reached."""
+    reaches min_injections in every set, or the radius spans the map. Returns ([csr (n_out, n_row) per level],
+    statistics: rows completed at each level, rows left to the all-cell pool (`_fallback_values`)). A level's matrix holds rows only for the rows still short when it is reached."""
     n_row = bc.ids.size
     levels, hist = [], {}
     need = short.copy()
@@ -1206,13 +1232,6 @@ def _ladder_extension(bc: _BandCells, out_rows: np.ndarray, short: np.ndarray, c
         need = need & st
         levels.append(W)
         if k * rule.radius_arcsec > bc.diameter:
-            # this level is the class over the whole map: accepted down to CLASS_MAP_MIN injections
-            hist["class_map_rows"] = int(need.any(1).sum())
-            hist["class_map_planes"] = int(need.sum())
-            st = np.zeros_like(need)
-            for c in cs:
-                st |= (W @ c) < CLASS_MAP_MIN
-            need = need & st
             break
     hist["to_map_fallback_rows"] = int(need.any(1).sum())
     hist["to_map_fallback_planes"] = int(need.sum())
@@ -1221,13 +1240,14 @@ def _ladder_extension(bc: _BandCells, out_rows: np.ndarray, short: np.ndarray, c
 
 def _fallback_values(fb: np.ndarray, set_index: int, g: Optional[int], edge_out: Optional[np.ndarray], n_out: int,
                      min_n: int) -> Tuple[np.ndarray, np.ndarray]:
-    """(median, scatter) (n_out, N_PLANES) of the "widen" rule's last steps from the table's map-wide values: the
-    row's class over the map (edge class, no window) where it holds min_n, else the whole map; NaN where neither."""
+    """(median, scatter) (n_out, N_PLANES) of the "widen" rule's all-cell pool from the table's map-wide values: the
+    row's edge class over the map (no window) where the rule has an edge class and it holds min_n, else the whole map
+    (down to MAP_MIN injections where the whole map holds fewer than min_n); NaN only for a map with < MAP_MIN."""
     gi = 2 if g is None else g
     med = np.full((n_out, N_PLANES), np.nan)
     sc = np.full((n_out, N_PLANES), np.nan)
     whole = fb[set_index, gi, 2]
-    ok_w = whole[:, 0] >= min_n
+    ok_w = whole[:, 0] >= MAP_MIN            # the whole map: min_n wherever it holds them, at least MAP_MIN
     med[:, ok_w], sc[:, ok_w] = whole[ok_w, 1], whole[ok_w, 2]
     if edge_out is not None:
         for e in (0, 1):
@@ -1306,29 +1326,37 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
         pos_all = np.searchsorted(loaded, np.arange(n_all))
         ladder += [remap(W, pos_all) for W in extra]
         level_min += [rule.min_injections] * len(extra)
-        if "class_map_rows" in hist:
-            level_min[-1] = CLASS_MAP_MIN
     bm = rec["half"] == 0
     build = {k: rec[k][bm] for k in ("row", "plane", "recovered", "near", "dflux", "lnr")}
-    # the curve: main's pooling (in S/N, no window, no class), per gradient class for curve_class "gradient"
+    # the curve: main's pooling (in S/N, no window, no class); under curve_class "gradient" a coverage-edge cell's two
+    # curves pool the edge cells' injections of each |ln r| class (M3); the held-out half's curve the same way (C1)
     if rule.noise_window is None and not rule.edge_class:
         curve_Ws = ladder[:len(Ws)]
     else:
         curve_Ws = [remap(W, pos_ext)[out_local] for W in
                     pool_matrices(cg, ext_ids, np.zeros(ext.size, np.int8), PoolingRule.legacy())]
-    out = _pool_product(curve_Ws, build, flux_grid_mjy, sig, n_loaded, sig_out)
     if rule.curve_class == "gradient":
         edge_cls = (edge_ratio > rule.edge_ratio).astype(np.int8)
         edge_rule = PoolingRule(rule.radius_arcsec, rule.widenings, rule.min_injections, edge_class=True,
                                 edge_ratio=rule.edge_ratio)
         edge_W = [remap(W, pos_ext)[out_local] for W in pool_matrices(cg, ext_ids, edge_cls[ext], edge_rule)]
-        gb = _gradient_class(build["lnr"], rule.gradient_boundary)
-        parts = [_pool_product(edge_W, {k: v[gb == g] for k, v in build.items()}, flux_grid_mjy, sig, n_loaded,
-                               sig_out) for g in (0, 1)]
         is_edge = edge_cls[out_rows].astype(bool)
-        for k in ("curve", "flux90", "n_pos", "pooled_total"):
-            e = is_edge.reshape((-1,) + (1,) * (out[k].ndim - 1))
-            out[k] = np.stack([np.where(e, q[k], out[k]) for q in parts])
+
+    def curve_of(r):
+        o = _pool_product(curve_Ws, r, flux_grid_mjy, sig, n_loaded, sig_out)
+        if rule.curve_class == "gradient":
+            gb = _gradient_class(r["lnr"], rule.gradient_boundary)
+            parts = [_pool_product(edge_W, {k: v[gb == g] for k, v in r.items()}, flux_grid_mjy, sig, n_loaded,
+                                   sig_out) for g in (0, 1)]
+            for k in ("curve", "flux90", "n_pos", "pooled_total"):
+                e = is_edge.reshape((-1,) + (1,) * (o[k].ndim - 1))
+                o[k] = np.stack([np.where(e, q[k], o[k]) for q in parts])
+        return o
+
+    out = curve_of(build)
+    hm = ~bm
+    held_c = curve_of({k: rec[k][hm] for k in ("row", "plane", "recovered", "near", "dflux", "lnr")})
+    out["held_curve"], out["held_total"] = held_c["curve"], held_c["pooled_total"]
     fb = np.asarray(tab.data["fallback"]) if (rule.short_rule == "widen" and "fallback" in tab.data) else None
     edge_out = classes_all[out_rows] if rule.edge_class else None
 
@@ -1395,7 +1423,9 @@ class BandCompleteness:
 def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, stats: dict,
                   flux_grid_mjy: np.ndarray) -> BandCompleteness:
     """The band from its pooling blocks (`_assemble_tile` + `_band_dict`): rows in cell-id order (FROZEN 4); every row
-    filled exactly once. `held`, `stats`: `read_held`."""
+    filled exactly once. `held`, `stats`: `held_and_stats`. `held` gains build_errors (C2), and the held-out half's own
+    curve and pooled totals built exactly as the stored curve (`curve`, `curve_total`: C1, per class under a gradient
+    curve)."""
     n_row = np.asarray(detection.cells.ids).size
     n_plane = flux_grid_mjy.size
     if not pooled:
@@ -1411,6 +1441,8 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
     f90 = arr(cl, (n_row,), np.float32, np.nan)
     n_pos = arr(cl, (n_row,), np.int32, 0)
     tot = arr(cl, (n_row, n_plane), np.float64, 0.0)
+    h_curve = arr(cl, (n_row, n_plane), np.uint16, 0)
+    h_tot = arr(cl, (n_row, n_plane), np.float64, 0.0)
     errs = {k: arr(el, (n_row, n_plane), np.float32, np.nan) for k in ("scatter", "bias")}
     build_errs = {k: arr(el, (n_row, n_plane), np.float32, np.nan) for k in ("scatter", "bias")}
     filled = np.zeros(n_row, bool)
@@ -1420,6 +1452,7 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
         assert not filled[r].any()
         filled[r] = True
         curve[..., r, :], f90[..., r], n_pos[..., r], tot[..., r, :] = o["curve"], o["flux90"], o["n_pos"], o["pooled_total"]
+        h_curve[..., r, :], h_tot[..., r, :] = o["held_curve"], o["held_total"]
         for k in errs:
             errs[k][..., r, :] = o["errors"][k]
             build_errs[k][..., r, :] = o["build_errors"][k]
@@ -1428,6 +1461,7 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
     assert filled.all()
     held = dict(held)
     held["build_errors"] = build_errs
+    held["curve"], held["curve_total"] = h_curve, h_tot
     stats = dict(stats, min_pool=float(tot.min()) if tot.size else np.nan,
                  median_pool=float(np.median(tot)) if tot.size else np.nan,
                  short=float((tot < MIN_INJECTIONS).mean()) if tot.size else np.nan, widen=widen,
