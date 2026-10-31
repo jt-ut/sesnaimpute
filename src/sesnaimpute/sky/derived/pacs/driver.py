@@ -20,10 +20,10 @@ the rest of the chain:
     step "detect": prepare (1 node: per band `stages mosaic` -- which converts the region's stored dense mosaic to the
                    tile store and verifies it bit for bit, or builds it -- `stages psf`, `stages detect`)
     step "rest":   (written once the region's detect rows are all done; K of each band from its detect record)
-                   per band one job on K nodes: the injection rounds (the K shares of a round as srun steps, a barrier
-                   between rounds) then the pooling (K shares, then the assembly) -> finish (1 node, afterok every band:
-                   `stages finish`, which writes and verifies the products and their CHECKS, then `catalog.curated`
-                   for the region)
+                   per band with maps one job on K nodes: the injection rounds (the K shares of a round as srun steps,
+                   a barrier between rounds) then the pooling (K shares, then the assembly) -> finish (1 node, afterok
+                   every band: the empty pooling record of a band without maps, `stages finish`, which writes and
+                   verifies the products and their CHECKS, then `catalog.curated` for the region)
 The owner runs the driver and `bash`es the phase file on a LOGIN node; after the detect jobs end the same driver command
 rewrites the phase file with the rest step. A job whose rows are done does nothing, so a failed job is resubmitted by
 running the driver again. The file submits region by region and waits (sleeping, on the login node) until the user's
@@ -256,7 +256,10 @@ def _chain(config, config_path: str, region: str, system: Optional[System], box=
         commands = tuple(w(STAGES_MODULE, s, "--band", b) for b in BANDS for s in ("mosaic", "psf", "detect"))
         return [Job("pacs_%s_prepare" % tag, "prepare", "", 1, DETECT_LIMIT, commands, ())]
     jobs = []
+    mapped = {r.band for r in read_index(config, region)} if config is not None else set(BANDS)
     for b in BANDS:
+        if b not in mapped:             # no map of the band: its empty pooling record is written by the finish job
+            continue
         if laptop:
             k, limit = 1, ""
         else:
@@ -267,9 +270,10 @@ def _chain(config, config_path: str, region: str, system: Optional[System], box=
                         (w(DRIVER_MODULE, "inject-band", "--band", b, "--of", k, *launch),
                          w(DRIVER_MODULE, "pool-band", "--band", b, "--of", k, *launch)), ()))
     curated = (python, "-W", "ignore", "-m", CURATED_MODULE, config_path, "--regions", region)
+    empty = tuple(w(STAGES_MODULE, "pool", "--band", b) for b in BANDS if b not in mapped)
     jobs.append(Job("pacs_%s_finish" % tag, "finish", "", 1,
                     "" if laptop else wall_limit(system.rates["FINISH_MIN"]),
-                    (w(STAGES_MODULE, "finish"), curated), tuple(j.name for j in jobs)))
+                    empty + (w(STAGES_MODULE, "finish"), curated), tuple(j.name for j in jobs)))
     return jobs
 
 

@@ -32,7 +32,7 @@ Row names (value; bar):
   HPPSC_RECOVERY_POINT_SNR (>= 0.90 within the binomial error at the bar)
   CHANCE_COINCIDENCES (info)
 
-What the checks read of the carriers (contract changes needed are listed in REPORT_R2_E.md): Mosaic: .psf (MosaicPSF: .meta
+What the checks read of the carriers : Mosaic: .psf (MosaicPSF: .meta
 = psf.json, .weights, .map_weights, .enclosed_at, .n_sub, .shape), .grid (PixelGrid), .window, .template_patches,
 .injection_half_width, .pixel_arcsec, .band; BandCompleteness.held: row, plane, near, recovered, dflux, flux, det_flux and
 build_errors = {"scatter": (n_row, n_plane)} (the error built from the build half alone); optionally build_row,

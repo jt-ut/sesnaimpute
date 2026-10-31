@@ -75,7 +75,7 @@ from sesnaimpute.sky.derived.pacs.grid import CELL_ARCSEC, INJECTION_BLOCK_LINES
 from sesnaimpute.sky.derived.pacs.mosaic import Mosaic
 
 # ----------------------------------------------------------------------------------------------------------------------
-# constants (moved unchanged from pacs_completeness.py; deleted there in round 3)
+# constants (moved unchanged from the retired pacs_completeness.py)
 
 #: PACS has no Vega system: zero point 1 Jy, m = -2.5 log10(F / 1 Jy)
 ZERO_POINT_JY = 1.0
@@ -268,8 +268,7 @@ class Injector:
     recovered = nearest peak within the recovery radius and brighter than any real source there; near = within
     BLEND_RADIUS_BEAMS x beam of a real detection). Per-worker memory: one tile window + per-row arrays (no
     n_cells-sized array: the old row_of_cell is a search on the sorted row ids).
-    `layers`: the band's detection layers (detect.open_detection) that `detect.window_peaks` reads (contract change:
-    the contract's signature has no way to reach them).
+    `layers`: the band's detection layers (detect.open_detection) that `detect.window_peaks` reads.
     Identity: `pacs_completeness.Injector` (pacs_completeness.py:832-1017): bit-identical records for the same
     (seed_key, plane, batch, half, block)."""
 
@@ -316,9 +315,8 @@ class Injector:
 
     # -- positions
     def _draw(self, rng, rows, n):
-        """n positions, each uniform inside the cell of a randomly chosen row of `rows`."""
-        x0, x1, y0, y1 = self.cells.bounds(self.ids[rows[rng.integers(0, rows.size, n)]])
-        return x0 + (x1 - x0) * rng.random(n), y0 + (y1 - y0) * rng.random(n)
+        """n positions, each uniform inside the cell of a randomly chosen row of `rows` (detect._draw)."""
+        return detect._draw(self.cells, self.ids, rng, rows, n)
 
     def _valid(self, x, y):
         """Positions inside a row's cell, on a pixel of usable data (the reader's error mask)."""
@@ -329,24 +327,8 @@ class Injector:
         return ok
 
     def _thin(self, x, y, limit):
-        """Greedy selection, in order, of at most `limit` positions no two closer than the separation."""
-        n = x.size
-        if n == 0:
-            return np.zeros(0, np.int64)
-        pairs = cKDTree(np.c_[x, y]).query_pairs(self.separation_px, output_type="ndarray").reshape(-1, 2)
-        both = np.concatenate([pairs, pairs[:, ::-1]])
-        both = both[np.argsort(both[:, 0], kind="stable")]
-        edges = np.searchsorted(both[:, 0], np.arange(n + 1))
-        removed = np.zeros(n, bool)
-        chosen = []
-        for i in range(n):
-            if removed[i]:
-                continue
-            chosen.append(i)
-            if len(chosen) >= limit:
-                break
-            removed[both[edges[i]:edges[i + 1], 1]] = True
-        return np.asarray(chosen, np.int64)
+        """Greedy selection, in order, of at most `limit` positions no two closer than the separation (detect._thin)."""
+        return detect._thin(x, y, limit, self.separation_px)
 
     def positions(self, rng, rows):
         """One batch's positions over the valid pixels of the cells of `rows`, one per SEPARATION_AREAS squared
@@ -492,8 +474,7 @@ class _Operations:
         self.paste = mosaic.paste
 
     def peaks(self, inj: "Injector", x, y, r, flux, win):
-        """(found, xc, yc, fnu, distance) of the nearest peak within r (contract change: the contract's docstring
-        names the fifth return value snr; the identity is the old distance)."""
+        """(found, xc, yc, fnu, distance) of the nearest peak within r."""
         return detect.window_peaks(self.m, inj.layers, x, y, r, inj.m_offset_cell, inj.m_sigma_cell, inj.offset_cell,
                                    flux=flux, window=win)
 
@@ -753,8 +734,8 @@ TABLE_NAME = "table.hdf5"
 
 
 def build_table(records_dir: str, n_row: int, sigma: Optional[np.ndarray] = None) -> str:
-    """The band's record table, written once before its pooling blocks (contract change: a public step the stages
-    call; `pool_block` builds it when absent): both halves' records sorted by row (a stable sort of the records taken in
+    """The band's record table, written once before its pooling blocks (`pool_block` builds it when absent): both
+    halves' records sorted by row (a stable sort of the records taken in
     (half, plane, block, batch) order, so the table does not depend on the order the pieces finished) with `offsets`
     (n_row + 1); far-injection counts per (row, plane) of each half and gradient class (`far_h<half>_g<class>`); the
     per-row coverage (from the designated round-0 pieces); the held-out half (`held/<key>`, in the same order) and the
@@ -984,14 +965,19 @@ EPS_FLUX_READING = ("The part of a source's flux error that grows in proportion 
 
 POOLING_CLASSES = ("none", "window", "window_edge", "window_gradient")
 #: PRODUCTION estimator (owner's ruling 2026-10-31): pool only cells with CELL_SIGMA within x1.5 of the target's
-#: (the window restores the ruled calibration of noisy cells on their own residuals, FIX_SPEC sec 8, 12); the
-#: coverage-edge class is NOT used (measured to add <= 0.013 to the noisy-bin scatter ratio)
+#: (the window restores the ruled calibration of noisy cells on their own residuals, FIX_SPEC sec 8, 12). Measured (M1,
+#: Taurus/Aquila P100 held-out C2): noisy bins 1.104-1.216 -> 1.044-1.060 / 1.066-1.166 -> 1.030-1.063, quiet within
+#: 0.008; the coverage-edge class is NOT used (it adds <= 0.013). M7: the window also removes the within-pool spread of
+#: ln CELL_SIGMA (0.33-0.55 vs 0.11) that flattens the tiny maps' curves.
 PRODUCTION_POOLING_CLASS = "window"
-#: PRODUCTION short-cell rule (owner 2026-10-31): widen inside the window until MIN_INJECTIONS, else the all-cell pool;
-#: SCATTER is never NaN and the acceptance never drops a read (FIX_SPEC sec 12 item 2)
+#: PRODUCTION short-cell rule (owner 2026-10-31, completed after M8): widen inside the window up to the whole map, then
+#: the window class over the map at FALLBACK_MIN, then the map's scatter x R_class (never the plain all-cell pool for a
+#: windowed cell); SCATTER is never NaN and the acceptance never drops a read (FIX_SPEC sec 12 item 2; M1: 0.4-2.2 % of
+#: cells cannot reach MIN_INJECTIONS in some plane with any class pooling)
 PRODUCTION_SHORT_CELL_RULE = "widen"
 #: PRODUCTION curve (owner 2026-10-31): two curves per coverage-edge cell by |ln r| <= / > 0.03, each source read on
-#: its own r (M3: recovery depends on |ln r| in edge cells, -0.10 at the transition); other cells one curve
+#: its own r (M3, Taurus/Aquila edge cells: logistic slope on |ln r| -2.2 to -2.3, z > 25; middle vs outer |ln r|
+#: quartiles +0.10 in recovered fraction at the 0.5 point, +0.06-0.12 near 0.9); other cells one curve
 PRODUCTION_CURVE_CLASS = "gradient"
 SHORT_RULES = ("nan", "widen")
 CURVE_CLASSES = ("cell", "gradient")
@@ -1007,8 +993,7 @@ class PoolingRule:
     where the rule has an edge class, else the whole map)), `gradient_class`
     (the errors' injections split by |ln r| <= / > `gradient_boundary`: two SCATTER/BIAS per cell), `curve_class`
     ("cell", main's; "gradient": two curves per coverage-edge cell by |ln r|). The three named parameters of the
-    brief map onto these fields through `named` (contract change: gradient_class, gradient_boundary, curve_class and
-    `named` are additions)."""
+    brief map onto these fields through `named`."""
     radius_arcsec: float
     widenings: Tuple[int, ...]
     min_injections: int
@@ -1547,7 +1532,7 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
     filled exactly once. `held`, `stats`: `held_and_stats`. `held` gains build_errors (C2), and the held-out half's own
     curve and pooled totals built exactly as the stored curve (`curve`, `curve_total`: C1, per class under a gradient
     curve). With `rule` (non-legacy) and `records_dir`: the flux-proportional term `fit_flux_term` on the build half, as
-    `eps_flux` (also held["eps_flux"]); None otherwise (the legacy rule: not applied). Contract change: keywords added."""
+    `eps_flux` (also held["eps_flux"]); None otherwise (the legacy rule: not applied)."""
     n_row = np.asarray(detection.cells.ids).size
     n_plane = flux_grid_mjy.size
     if not pooled:
