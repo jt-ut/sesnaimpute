@@ -33,7 +33,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from sesnaimpute.sky.derived.pacs.grid import TiledLayer, celestial_wcs
+from sesnaimpute.sky.derived.pacs.grid import LAYER_FILL, TiledLayer, celestial_wcs
 
 LAYERS = ("image", "error", "coverage", "weight")
 #: old META key -> new (CONTRACT sec 5)
@@ -99,6 +99,9 @@ def verify_layer(layer_dir: str, dense: np.ndarray, wcs_header: str) -> int:
     if layer.wcs_header != wcs_header:
         raise ValueError("%s: WCS header differs from mosaic.hdf5" % layer_dir)
     celestial_wcs(layer.wcs_header)
+    want = LAYER_FILL[os.path.basename(os.path.normpath(layer_dir))]
+    if not (layer.fill == want or (np.isnan(want) and np.isnan(layer.fill))):
+        raise ValueError("%s: fill %r != %r" % (layer_dir, layer.fill, want))
     nbad = 0
     ny, nx = dense.shape
     uint = {4: np.uint32, 8: np.uint64}[dense.dtype.itemsize]
@@ -128,12 +131,14 @@ def convert_directory(directory: str, out_directory: Optional[str] = None, delet
         t0 = time.time()
         final = os.path.join(out_directory, name)
         if not os.path.exists(os.path.join(final, "index.json")):
-            part = final + ".converting"
+            # built under <out>/.converting/<name>: the folder's basename is the layer name, which picks its fill
+            part = os.path.join(out_directory, ".converting", name)
             if os.path.exists(part):
                 shutil.rmtree(part)
-            os.makedirs(out_directory, exist_ok=True)
+            os.makedirs(os.path.dirname(part), exist_ok=True)
             TiledLayer.from_dense(dense, part, wcs_header=wcs_header, meta=meta if name == "image" else None)
             os.replace(part, final)
+            shutil.rmtree(os.path.dirname(part), ignore_errors=True)
         bad = verify_layer(final, dense, wcs_header)
         layer = TiledLayer.open(final, "r")
         after = layer.disk_bytes() + os.path.getsize(os.path.join(final, "index.json"))
