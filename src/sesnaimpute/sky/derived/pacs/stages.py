@@ -771,8 +771,14 @@ def _band_completeness(config, region, band, box):
 # the stages: each returns (outputs, note); an output is {"kind": record | dir | file, "path", "receipt" (dir, file)}
 
 def _mosaic_complete(d: str) -> bool:
-    return (all(os.path.exists(os.path.join(d, layer, "index.json")) for layer in mosaic.LAYERS)
-            and os.path.exists(os.path.join(d, "psf", "psf.json")))
+    """The four layers' index.json, psf/psf.json and every input map's smoothed-error store psf.json names (a store
+    whose layers were converted but whose smoothed errors were not is incomplete: Vista 2026-11-01)."""
+    if not (all(os.path.exists(os.path.join(d, layer, "index.json")) for layer in mosaic.LAYERS)
+            and os.path.exists(os.path.join(d, "psf", "psf.json"))):
+        return False
+    with open(os.path.join(d, "psf", "psf.json")) as fh:
+        maps = json.load(fh).get("maps", [])
+    return all(os.path.exists(os.path.join(d, q["smooth"], "index.json")) for q in maps)
 
 
 def _stage_mosaic(config, region, box, key, n_jobs, **_):
@@ -795,7 +801,7 @@ def _stage_mosaic(config, region, box, key, n_jobs, **_):
         mosaic.build_mosaic(config, region, key.band, box=box, n_jobs=n_jobs)
         note = "built from the input maps"
     if not _mosaic_complete(d):
-        raise StageError("%s: the mosaic store lacks the four layers' index.json or psf/psf.json" % d)
+        raise StageError("%s: the mosaic store lacks the four layers' index.json, psf/psf.json or a smoothed-error store" % d)
     mosaic.open_mosaic(config, region, key.band, box).neighbours()   # stored in META once (a converted store lacks it)
     return [dict(kind="dir", path=d, receipt=_manifest(d))], note
 
