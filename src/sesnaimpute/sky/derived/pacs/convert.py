@@ -11,7 +11,7 @@ the dense files (or under --out-root / --out-directory), the store `mosaic.Mosai
                                    `smooth` = "smooth/<map>", `lattice_step` -> `smooth_step`) plus "units" and
                                    "reading" {layer: text} from the layer datasets' attributes (the layout build_mosaic
                                    writes). A layer missing from the folder is skipped. hpx512 per tile by write_index.
-  smooth/<map>/                    each `_smooth/<map>.npy` as a TiledLayer (float64, fill NaN), as
+  smooth/<map>/                    each `_smooth/<map>.npy` (or .npy.zst) as a TiledLayer (float64, fill NaN), as
                                    psf.build_smoothed_error writes it
   psf/                             `_psf/` (psf.json with the same renames; sub<k>.npy and table.npy copied, or
                                    decompressed from .npy.zst)
@@ -113,16 +113,17 @@ def _same_bits(a: np.ndarray, b: np.ndarray) -> int:
     return int(np.count_nonzero(np.ascontiguousarray(a).view(np.uint8) != np.ascontiguousarray(b).view(np.uint8)))
 
 
-def _convert_smooth(directory: str, out_directory: str, log) -> int:
-    """`_smooth/<map>.npy` -> `smooth/<map>/` (TiledLayer float64, fill NaN), verified bit-equal. Returns the number of
-    differing samples."""
+def _convert_smooth(directory: str, out_directory: str, scratch: str, log) -> int:
+    """`_smooth/<map>.npy` (or `.npy.zst`, decompressed into `scratch` as `_open_dense` does) -> `smooth/<map>/`
+    (TiledLayer float64, fill NaN), verified bit-equal. Returns the number of differing samples."""
     src = os.path.join(directory, "_smooth")
+    names = sorted({n[:-len(".npy")] if n.endswith(".npy") else n[:-len(".npy.zst")]
+                    for n in os.listdir(src) if n.endswith((".npy", ".npy.zst"))}) if os.path.isdir(src) else []
     bad = 0
-    for name in sorted(os.listdir(src)) if os.path.isdir(src) else ():
-        if not name.endswith(".npy"):
-            continue
-        dense = np.load(os.path.join(src, name))
-        final = os.path.join(out_directory, _smooth_name(os.path.join("_smooth", name)))
+    for name in names:
+        dense, _size, tmp = _open_dense(src, name, scratch)
+        dense = np.asarray(dense)
+        final = os.path.join(out_directory, _smooth_name(os.path.join("_smooth", name + ".npy")))
         if not os.path.exists(os.path.join(final, "index.json")):
             part = final + ".converting"
             if os.path.exists(part):
@@ -131,8 +132,11 @@ def _convert_smooth(directory: str, out_directory: str, log) -> int:
             os.makedirs(os.path.dirname(final), exist_ok=True)
             os.replace(part, final)
         bad += _same_bits(TiledLayer.open(final, "r").to_dense(), dense)
+        del dense
+        if tmp:
+            os.remove(tmp)
     if os.path.isdir(src):
-        log("smooth    %d smoothed-error stores, mismatching samples %d" % (len(os.listdir(src)), bad))
+        log("smooth    %d smoothed-error stores, mismatching samples %d" % (len(names), bad))
     return bad
 
 
@@ -236,7 +240,11 @@ def convert_directory(directory: str, out_directory: Optional[str] = None, delet
             os.remove(tmp)
         log("%-9s dense %12d B -> tiles %12d B  ratio %.3f  tiles %s  mismatching pixels %d  %.1f s"
             % (name, before, after, after / max(before, 1), result[name]["tiles"], bad, result[name]["seconds"]))
-    bad_smooth = _convert_smooth(directory, out_directory, log)
+    bad_smooth = _convert_smooth(directory, out_directory, scratch, log)
+    for q in meta.get("maps", ()):          # every input map's smoothed error must now be a store
+        if not os.path.exists(os.path.join(out_directory, q["smooth"], "index.json")):
+            raise RuntimeError("%s: no smoothed-error store for map %s (nothing in _smooth/ to convert)"
+                               % (directory, q["path"]))
     bad_psf = _convert_psf(directory, out_directory, scratch, log)
     shutil.rmtree(scratch, ignore_errors=True)
     if any(r["bad"] for r in result.values()) or bad_smooth or bad_psf:

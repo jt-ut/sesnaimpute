@@ -863,7 +863,9 @@ def _stage_inject(config, region, box, key, n_jobs, tasks=None, **_):
     layers = detect.open_detection(work_dir(config, region, box, key.band))
     done = pieces_module.run(functools.partial(inject.inject_task, config, m, det, layers=layers), mine, n_jobs,
                              unit="injection pieces (round %d, shard %d of %d)" % (key.round, key.shard, key.of))
-    tables = _concat_records(done) if done else {}
+    # a shard with no piece (a late round with fewer tasks than shards) writes every column empty, so the table
+    # builder reads it like any other record (Orion A P100 round 22 shard 1 on Vista, 2026-11-01)
+    tables = _concat_records(done) if done else {k: np.zeros(0, dt) for k, dt in inject.RECORD_COLUMNS}
     counts = np.asarray(inject.record_counts(tables, int(np.asarray(det.cells.ids).size)) if tables else
                         np.zeros((int(np.asarray(det.cells.ids).size), 2 * inject.N_PLANES), np.int64))
     rec = (np.asarray(inject.record_counts({k: np.asarray(v)[np.asarray(tables["recovered"], bool)]
@@ -890,6 +892,10 @@ def _stage_pool(config, region, box, key, n_jobs, **_):
     rule = _pooling_rule()
     mine = inject.pool_tasks(det)[key.shard::key.of]
     fn = functools.partial(inject.pool_block, det, work_dir(config, region, box, key.band), rule=rule, flux_grid_mjy=fgrid)
+    # the band's record table is built ONCE here, before the workers start: a worker that finds it absent builds
+    # it itself, and n_jobs workers each holding every record of the band in memory at once killed the Orion A
+    # P70 and P160 pools on Vista (144 workers, 4-6 GB of records; 2026-11-01)
+    inject.table_for(det, work_dir(config, region, box, key.band))
     done = pieces_module.run(fn, mine, n_jobs, unit="pooling blocks (shard %d of %d)" % (key.shard, key.of))
     _write_object(path, list(done), dict(stage="pool", band=key.band, shard=key.shard, K=key.of, n_blocks=len(mine),
                                          rule=repr(rule)))

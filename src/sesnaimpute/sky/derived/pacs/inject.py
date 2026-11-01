@@ -864,10 +864,16 @@ def _map_mad_all_planes(table: dict, sigma: np.ndarray) -> np.ndarray:
     return out
 
 
+def table_for(detection: BandDetection, records_dir: str) -> str:
+    """The band's record table, built when absent (`build_table` over the band's cells with the stored float32
+    CELL_SIGMA, as the pooling blocks read it): the one place its arguments come from. Returns its path."""
+    return build_table(records_dir, int(np.asarray(detection.cells.ids).size), _f32(detection.cells.sigma))
+
+
 def held_and_stats(detection: BandDetection, records_dir: str) -> Tuple[dict, dict]:
     """(held-out half, statistics) of a band, what `assemble_band` takes: the record table built when absent
-    (`build_table` with the band's CELL_SIGMA, so the "widen" rule's map-wide values are present), then read."""
-    build_table(records_dir, np.asarray(detection.cells.ids).size, detection.cells.sigma)
+    (`table_for`, so the "widen" rule's map-wide values are present), then read."""
+    table_for(detection, records_dir)
     return read_held(records_dir)
 
 
@@ -930,8 +936,8 @@ def _runs(rows: np.ndarray) -> List[Tuple[int, int]]:
 _TABLE = {}
 
 
-def _open_table(records_dir: str, n_row: int, sigma: Optional[np.ndarray] = None) -> _Table:
-    path = build_table(records_dir, n_row, sigma)
+def _open_table(detection: BandDetection, records_dir: str) -> _Table:
+    path = table_for(detection, records_dir)
     if _TABLE.get("path") != path:
         _TABLE.clear()
         _TABLE.update(path=path, table=_Table(path))
@@ -1447,7 +1453,7 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
     ids = np.asarray(detection.cells.ids, np.int64)
     n_all = ids.size
     sigma_all = _f32(detection.cells.sigma)
-    tab = _open_table(records_dir, n_all, sigma_all)
+    tab = _open_table(detection, records_dir)
     halo = _pool_halo(rule)
     ey0, ey1 = max(i0 - halo, 0), i1 + halo
     ex0, ex1 = max(j0 - halo, 0), min(j1 + halo, nx)
@@ -1801,7 +1807,7 @@ def fit_flux_term(detection: BandDetection, records_dir: str, build_scatter: np.
         return None
     ids = np.asarray(detection.cells.ids, np.int64)
     sigma = np.asarray(detection.cells.sigma, np.float64)
-    tab = _open_table(records_dir, ids.size, _f32(detection.cells.sigma))
+    tab = _open_table(detection, records_dir)
     rec, rec_row = tab.rows(("plane", "half", "near", "dflux", "lnr"), np.arange(ids.size))
     # the injected flux: plane S/N x the CELL_SIGMA of the cell the injection landed in (the table keeps no flux column)
     flux = snr_grid()[rec["plane"].astype(np.int64)] * sigma[rec_row]
