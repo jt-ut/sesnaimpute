@@ -100,6 +100,9 @@ SYSTEM_DEFAULTS = {
     "stampede3": dict(partition="spr", cpus=112, max_nodes=64, max_queued=36, user_nodes=96, sbatch_extra=""),
     "vista": dict(partition="gg", cpus=144, max_nodes=32, max_queued=40, user_nodes=96, sbatch_extra="--propagate=NONE"),
 }
+#: the most nodes one band's job asks for, on any system: a 4-5 node job waited ten hours on a full partition where
+#: 2-node jobs backfill (owner 2026-11-01: never more than 2 nodes per job); a band's wall limit grows instead
+BAND_NODES_MAX = 2
 #: the section keys every system must name (paths and account: never defaulted)
 SYSTEM_REQUIRED = ("account", "software", "env_script", "slurm_dir")
 STAGES_MODULE = "sesnaimpute.sky.derived.pacs.stages"
@@ -199,9 +202,9 @@ def _limit(minutes: int) -> str:
 
 
 def node_cap(system: System) -> int:
-    """The most nodes one band's job takes: the system's per-job cap and a third of the user's nodes (the three
-    bands' jobs run together)."""
-    return max(1, min(system.max_nodes, (system.user_nodes - len(BANDS)) // len(BANDS)))
+    """The most nodes one band's job takes: BAND_NODES_MAX (2), under the system's per-job cap and a third of the
+    user's nodes (the three bands' jobs run together)."""
+    return max(1, min(BAND_NODES_MAX, system.max_nodes, (system.user_nodes - len(BANDS)) // len(BANDS)))
 
 
 def _plan(band: str, n0: int, system: System) -> BandPlan:
