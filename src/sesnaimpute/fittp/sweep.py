@@ -688,7 +688,10 @@ def _source_task(i):
         # blend that varies with the extinction `a` is formed inside
         # `_cell_sum` itself, at each cell's own `a*`), so this reads once
         # per source, not once per design below.
-        gaia_inputs = w["gaia_term"].cell_inputs(rows, model_index, w["cls"].lower())
+        # U3: A_X of STAR/AGB is per template at this design's own fitted scale
+        # (log10_b_hat), and the unmatched branch reads H at the extinction the
+        # class's distance allows, so the Gaia inputs are formed per design
+        # below, right after its fit.
 
         fits = [None, None]
         # NONDET2 section 2: the separable record's three totals, per
@@ -741,6 +744,8 @@ def _source_task(i):
             # needs the detected bands' own p_d beside the undetected
             # bands' p_u, so `batch.detected_mask` rides beside
             # `batch.nondet_mask` into the cell sum, argument-list only.
+            gaia_inputs = w["gaia_term"].cell_inputs(
+                rows, model_index, w["cls"].lower(), fit_k.log10_b_hat[None, :])
             ln_lambda2_k, ln_lambda0_k, ln_lambda1_k, a_post_k, a2_post_k = prior_reader.ln_prior(
                 w["reader"], rows, h, fit_k.a_hat[None, :], fit_k.log10_b_hat[None, :],
                 slope_log10b_per_ak, np.array([fit_k.sigma_a_ak]), model_index,
@@ -803,7 +808,7 @@ def _source_task(i):
             # prediction only, section 6.1.
             ln_gamma_ml[k] = w["gaia_term"].ln_gamma(
                 rows, model_index, fit_k.a_hat[None, :], fit_k.log10_b_hat[None, :],
-                w["cls"].lower())[0]
+                w["cls"].lower(), slope_log10b_per_ak)[0]
 
         if not dense_possible:
             ln_lambda0[1] = np.full(n_model, -np.inf, dtype=np.float32)

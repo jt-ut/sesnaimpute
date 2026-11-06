@@ -918,7 +918,7 @@ def _gaia_h(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_dense,
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
 def _gaia_ln_gamma(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_dense,
-                    ramp_lo, ramp_hi, matched_s, g_s, a_x, a_field, x_s, y_s, z_s):
+                    ramp_lo, ramp_hi, matched_s, g_s, a_x, a_field, a_un, x_s, y_s, z_s):
     """`ln Gamma(a)` at ONE extinction value (a cell's own `a*`, or a
     single-point fallback's one substitute): matched,
     `ln[G_S H(a) A_X + (1 - G_S)(1 - H(a)) A_FIELD]`, `G_S`/`A_X`/`A_FIELD`
@@ -939,6 +939,11 @@ def _gaia_ln_gamma(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_
     if matched_s:
         gamma = g_s * h * a_x + (1.0 - g_s) * (1.0 - h) * a_field
     else:
+        # U3 item 4: H at the extinction the class's distance allows (`a_un`,
+        # NaN = the extinction the caller is evaluating at), on the same ridge.
+        if math.isfinite(a_un):
+            h = _gaia_h(a_un, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_dense,
+                        ramp_lo, ramp_hi, x_s, y_s, z_s)
         h_capped = h if h < _C_CAP else _C_CAP
         gamma = 1.0 - h_capped
     if gamma < 1e-300:
@@ -952,7 +957,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
               template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask,
               detected_mask, bound_mask, bound_fnu, bound_sigma, lam,
-              gaia_matched, g_s, a_x, a_field, g0_mag, kg_draine, kg_whitney,
+              gaia_matched, g_s, a_x, a_field, a_un, g0_mag, kg_draine, kg_whitney,
               r_diffuse, r_dense, ramp_lo, ramp_hi, x_s_all, y_s_all, z_s_all,
               out_s0, out_s1, a_post_out, a2_post_out):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
@@ -1133,12 +1138,15 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 bound_full |= (1 << b)
         matched_s = gaia_matched[s]
         g_s_s = g_s[s]
-        a_x_s = a_x[s]
         a_field_s = a_field[s]
         x_s_s = x_s_all[s]
         y_s_s = y_s_all[s]
         z_s_s = z_s_all[s]
         for th in numba.prange(m):
+            # U3: A_X (STAR, AGB) and the unmatched branch's allowed extinction
+            # are per template; a single column is shared by every template.
+            a_x_th = a_x[s, th] if a_x.shape[1] > 1 else a_x[s, 0]
+            a_un_th = a_un[s, th] if a_un.shape[1] > 1 else a_un[s, 0]
             ah = a_hat[s, th]
             lo_a = ah - 5.0 * sig
             hi_a = ah + 5.0 * sig
@@ -1187,7 +1195,13 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
             # min(H, C_CAP) now varies with `a` too (through H), so this
             # prefilter -- and the per-cell read it guards -- runs for
             # every source the window covers, matched or not.
-            if in_grid:
+            if in_grid and (not matched_s) and math.isfinite(a_un_th):
+                # U3 item 4: H at the allowed extinction does not vary with the
+                # cell's own a*, so Gamma is one number for the whole window.
+                gaia_const_exp = math.exp(_gaia_ln_gamma(
+                    ah, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
+                    ramp_lo, ramp_hi, matched_s, g_s_s, a_x_th, a_field_s, a_un_th, x_s_s, y_s_s, z_s_s))
+            elif in_grid:
                 h_lo = _gaia_h(lo_a, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
                                ramp_lo, ramp_hi, x_s_s, y_s_s, z_s_s)
                 h_hi = _gaia_h(hi_a, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
@@ -1197,7 +1211,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 if both_low or both_high:
                     gaia_const_exp = math.exp(_gaia_ln_gamma(
                         ah, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
-                        ramp_lo, ramp_hi, matched_s, g_s_s, a_x_s, a_field_s, x_s_s, y_s_s, z_s_s))
+                        ramp_lo, ramp_hi, matched_s, g_s_s, a_x_th, a_field_s, a_un_th, x_s_s, y_s_s, z_s_s))
                 else:
                     gaia_do_percell = True
             if not in_grid:
@@ -1247,7 +1261,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         if gaia_do_percell:
                             gaia_ln = _gaia_ln_gamma(a_star, g0m, kgd, kgw, base, sl,
                                                       r_diffuse, r_dense, ramp_lo, ramp_hi,
-                                                      matched_s, g_s_s, a_x_s, a_field_s, x_s_s, y_s_s, z_s_s)
+                                                      matched_s, g_s_s, a_x_th, a_field_s, a_un_th, x_s_s, y_s_s, z_s_s)
                             term2 = term1 * math.exp(gaia_ln)
                         else:
                             term2 = term1 * gaia_const_exp
@@ -1296,7 +1310,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         if gaia_do_percell:
                             gaia_ln = _gaia_ln_gamma(a_star, g0m, kgd, kgw, base, sl,
                                                       r_diffuse, r_dense, ramp_lo, ramp_hi,
-                                                      matched_s, g_s_s, a_x_s, a_field_s, x_s_s, y_s_s, z_s_s)
+                                                      matched_s, g_s_s, a_x_th, a_field_s, a_un_th, x_s_s, y_s_s, z_s_s)
                             term2 = term1 * math.exp(gaia_ln)
                         else:
                             term2 = term1 * gaia_const_exp
@@ -1348,7 +1362,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     nondet_ln += _bound_ln_sum(a_top, bound_full, bound_fnu[s], bound_sigma[s], base, slope_b, template_log[th])
                     s1 = s0 + nondet_ln
                     gaia_ln = _gaia_ln_gamma(a_top, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
-                                              ramp_lo, ramp_hi, matched_s, g_s_s, a_x_s, a_field_s, x_s_s, y_s_s, z_s_s)
+                                              ramp_lo, ramp_hi, matched_s, g_s_s, a_x_th, a_field_s, a_un_th, x_s_s, y_s_s, z_s_s)
                     out_s0[s, th] = s0
                     out_s1[s, th] = s1
                     out[s, th] = s1 + gaia_ln
@@ -1390,7 +1404,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     nondet_ln += _bound_ln_sum(a_c0, bound_full, bound_fnu[s], bound_sigma[s], base, slope_b, template_log[th])
                     s1 = s0 + nondet_ln
                     gaia_ln = _gaia_ln_gamma(a_c0, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
-                                              ramp_lo, ramp_hi, matched_s, g_s_s, a_x_s, a_field_s, x_s_s, y_s_s, z_s_s)
+                                              ramp_lo, ramp_hi, matched_s, g_s_s, a_x_th, a_field_s, a_un_th, x_s_s, y_s_s, z_s_s)
                     out_s0[s, th] = s0
                     out_s1[s, th] = s1
                     out[s, th] = s1 + gaia_ln
@@ -1519,7 +1533,7 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     a2_post = np.full((n, m), np.nan, dtype=np.float64)
     out_s0 = np.full((n, m), -np.inf, dtype=np.float32)
     out_s1 = np.full((n, m), -np.inf, dtype=np.float32)
-    (matched, g_s, a_x, a_field, g0_mag, kg_draine, kg_whitney, r_diffuse, r_dense,
+    (matched, g_s, a_x, a_field, a_un, g0_mag, kg_draine, kg_whitney, r_diffuse, r_dense,
      x_s_all, y_s_all, z_s_all) = gaia_inputs
     core = _cell_sum(a_col, reader.xi_edges, sigma_a,
                       a_hat64, np.asarray(log10_b_hat, dtype=np.float64),
@@ -1541,6 +1555,7 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
                       np.ascontiguousarray(matched), np.ascontiguousarray(g_s, dtype=np.float64),
                       np.ascontiguousarray(a_x, dtype=np.float64),
                       np.ascontiguousarray(a_field, dtype=np.float64),
+                      np.ascontiguousarray(a_un, dtype=np.float64),
                       np.ascontiguousarray(g0_mag, dtype=np.float64),
                       np.ascontiguousarray(kg_draine, dtype=np.float64),
                       np.ascontiguousarray(kg_whitney, dtype=np.float64),

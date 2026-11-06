@@ -7,8 +7,7 @@ structure's own peak distance, not the region's literature distance, with
 the structure's own line-of-sight depth in quadrature with the Gaia
 parallax error (SPEC_BMSTP_DRAFT.md sec. 6.4): `mu = 1000/D_PEAK`, `sigma^2
 = sigma_plx^2 + (1000*half_width_pc/D_PEAK^2)^2`, `half_width_pc` half the
-region's own cloud interval (`bmstp.sample_cloud.cloud_interval_pc`, the
-doubled 16-84% interval about `D_PEAK`). Centring on the literature
+structure's 16-84% distance interval about `D_PEAK` (1-sigma half-width, (D_HI - D_LO)/2 of the region depth product; amended in U3 from half of `bmstp.sample_cloud.cloud_interval_pc`'s doubled interval). Centring on the literature
 distance while sizing the width off the structure peaked elsewhere puts
 the Normal's mass in the wrong tail wherever the two distances disagree
 (R4 D2); using the same peak for both keeps the statement single-sourced.
@@ -98,6 +97,36 @@ identically and `Gamma_h` reduces to the chance-match term `1 - G_S`
 other Gaia-dark template already reads, for any class. `_g_s_and_a_x_block`
 carries an explicit `"pahn"` branch (an arbitrary, unread `A_X`) so this
 is a stated design call, not a silent default or an unknown-class error.
+
+U3 (briefs/farir_gaia_2026-11-06/U3_gaia_term.md; studies/gaia_term_2026-11-06):
+the likelihood, not the census, changes in four places.
+
+  1. STAR's `A_X` is per template and flux: the `W_STAR`-weighted parallax
+     distribution of the simulated field stars carrying the template's own
+     `TEMPLATE_INDEX` and a 4.5 micron flux within `STAR_TEMPLATE_FLUX_WINDOW_DEX`
+     of the model's (the fitted scale times the register's `F_REF_I2`);
+     fewer than `STAR_TEMPLATE_MIN_STARS` there -> the template's own marginal,
+     fewer than that in the whole template -> the STAR class marginal
+     (`_star_hist`, `_build_template_cube`).
+  2. AGB's `A_X` is per template: a Normal in parallax centred on the implied
+     parallax `10^(log10_b / 2)` mas -- the register's `F_REF` is the flux at
+     `DREFKPC` = 1 kpc (checked against `L_SUN`: the integral of the eleven
+     `F_REF` bands at 1 kpc reproduces `L_SUN` to a median -0.03 dex), so the
+     fitted scale `B = (1 kpc / D)^2` = parallax^2 in mas^2 -- of width the
+     measurement error in quadrature with the luminosity spread of the GRAMS
+     grid for that spectral shape (`_agb_luminosity_width`), `ln 10 / 2`
+     times it in relative parallax. PAHC keeps the STAR class marginal.
+  3. `A_FIELD`, the chance-counterpart density, is the parallax distribution of
+     the simulated field stars Gaia would have DETECTED: each tile placement's
+     `W_STAR` weighted by the selection function at the star's observed G (its
+     `G_PROXY` dimmed by its own placed extinction) and its pixel's M10
+     (`_pooled_star_weights`). Same for every class.
+  4. The unmatched branch reads `H` at the extinction the class's distance
+     allows (`_template_block`'s `a_un`; the model moved along the fit's ridge
+     to it): STAR/AGB the canonical 3-D curve (`sky.derived.profile`) at the
+     template's median / implied distance, rescaled to the source's adopted
+     column; YSO/H2S that adopted column; GAL the curve's full column. PAHC and
+     PAHN keep the fitted extinction. `C_CAP` is kept.
 """
 
 import math
@@ -114,6 +143,7 @@ from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.granules import access as granule_access
 from sesnaimpute.population import anchor_tiles
 from sesnaimpute.population import selection
+from sesnaimpute.sky.derived import profile as profile_module
 
 __all__ = ["GaiaTerm"]
 
@@ -190,6 +220,34 @@ _CHANCE_MARGINAL_CLASS = "star"
 #: w/sigma <= 0.25 there.
 STAR_MARGINAL_BIN_WIDTH_MAS = 0.0125
 
+#: U3 item 1 (briefs/farir_gaia_2026-11-06/U3_gaia_term.md): a STAR template's
+#: A_X is the parallax distribution of the simulated field stars that carry
+#: the template's own `TEMPLATE_INDEX` and whose intrinsic 4.5 micron flux lies
+#: within this many dex of the source's model flux at 4.5 micron; with fewer
+#: than `STAR_TEMPLATE_MIN_STARS` such stars it falls back to the template's own
+#: marginal (all fluxes), then to the whole STAR class marginal.
+STAR_TEMPLATE_FLUX_WINDOW_DEX = 0.15
+STAR_TEMPLATE_MIN_STARS = 100
+#: Width of the log10 F(4.5) bins of the per-template parallax cube, dex (the
+#: window is `2 * STAR_TEMPLATE_FLUX_WINDOW_DEX / _FLUX_BIN_DEX` = 6 bins).
+_FLUX_BIN_DEX = 0.05
+#: Column of `field-stars_trilegal_region`'s `FNU_MJY` that is 4.5 micron
+#: (its band order J, H, Ks, 3.6, 4.5, 5.8, 8.0, 24).
+_FNU_I2_COLUMN = 4
+#: Parallax bins of the per-template cube, mas: `STAR_MARGINAL_BIN_WIDTH_MAS`
+#: wide up to `_PLX_LINEAR_MAX_MAS`, then 0.5 % of the parallax (so the bin is
+#: never wider than a few per cent of the smallest sigma a bright, near star
+#: carries); the Gaussian smoothing is the same midpoint rule as the marginal's.
+_PLX_LINEAR_MAX_MAS = 2.5
+_PLX_LOG_STEP = 0.005
+
+#: U3 item 2: the AGB templates whose spectral shape (log10 F_REF in every band
+#: relative to 4.5 micron, root-mean-square difference) lies within this many dex
+#: of a template's own are the template's luminosity neighbours -- three of the
+#: libraries' sampling lengths (`constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX`), the
+#: scale below which the fitter cannot tell two shapes apart.
+AGB_SHAPE_NEIGHBOUR_DEX = 3.0 * float(np.max(constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX))
+
 _SQRT_2PI = np.sqrt(2.0 * np.pi)
 
 
@@ -238,8 +296,17 @@ def _cloud_normal_params_mas(config, region):
         names = [n.decode("utf-8") for n in f["REGION"][:]]
         row = names.index(region)
         d_peak_pc = float(f["D_PEAK_PC"][row])
-    d_front_pc, d_back_pc = sample_cloud.cloud_interval_pc(config, region)
-    half_width_pc = 0.5 * (d_back_pc - d_front_pc)
+    # Amendment to U3: the depth term is the 1-SIGMA half-width of the
+    # structure's 16-84 % distance interval about D_PEAK, (D_HI - D_LO) / 2
+    # (not half of `cloud_interval_pc`'s doubled ~95 % interval, which other
+    # consumers rely on). A region the map does not resolve (`far_region`) has
+    # no 16-84 % interval of its own; it keeps half of `cloud_interval_pc`.
+    if sample_cloud.far_region(config, region):
+        d_front_pc, d_back_pc = sample_cloud.cloud_interval_pc(config, region)
+        half_width_pc = 0.5 * (d_back_pc - d_front_pc)
+    else:
+        _, _, d_lo_pc, d_hi_pc = sample_cloud._region_depth_row(config, region)
+        half_width_pc = 0.5 * (d_hi_pc - d_lo_pc)
     return 1000.0 / d_peak_pc, 1000.0 * half_width_pc / d_peak_pc ** 2
 
 
@@ -341,6 +408,139 @@ def _build_star_marginal(config, region, cls, bin_width_mas=STAR_MARGINAL_BIN_WI
     return centres[keep], p_bin[keep]
 
 
+def _plx_edges(plx_max_mas):
+    """Parallax bin edges of the per-template cube (module constants)."""
+    lin = np.arange(0.0, _PLX_LINEAR_MAX_MAS + 0.5 * STAR_MARGINAL_BIN_WIDTH_MAS,
+                    STAR_MARGINAL_BIN_WIDTH_MAS)
+    n_log = int(np.ceil(np.log(max(plx_max_mas, _PLX_LINEAR_MAX_MAS) / lin[-1]) / np.log1p(_PLX_LOG_STEP))) + 1
+    log = lin[-1] * (1.0 + _PLX_LOG_STEP) ** np.arange(1, n_log + 1)
+    return np.concatenate([lin, log])
+
+
+def _read_field_pool(config, region):
+    """The region's retained simulated field stars (columns the term reads)."""
+    path = config_module.product_path(config, "population", "trilegal", "field-stars", "region", region=region)
+    with h5py.File(path, "r") as f:
+        return dict(
+            dist_pc=f["DIST_PC"][:].astype(np.float64),
+            g_proxy=f["G_PROXY"][:].astype(np.float64),
+            ks_mag=f["KS_MAG"][:].astype(np.float64),
+            k_g_diffuse=f["K_G_DIFFUSE"][:].astype(np.float64),
+            k_g_dense=f["K_G_DENSE"][:].astype(np.float64),
+            template_index=f["TEMPLATE_INDEX"][:].astype(np.int64),
+            fnu45_mjy=f["FNU_MJY"][:, _FNU_I2_COLUMN].astype(np.float64),
+        )
+
+
+def _pooled_star_weights(config, region, pool):
+    """`(w_star, w_det)`, each `(n_pool,)`: the per-star `W_STAR` summed over the
+    tile placements of that star (`_build_star_marginal`'s own reweighting),
+    and the same sum with each placement also weighted by Gaia's selection
+    function at the placed star's OBSERVED G (its intrinsic `G_PROXY` dimmed
+    by its own placed extinction `A_STAR_K`, `anchor_tiles.
+    magnitudes_at_extinction`) at the tile pixel's own M10 -- the simulated
+    population that Gaia would actually have detected (U3 item 3)."""
+    n_pool = pool["dist_pc"].shape[0]
+    r_diffuse = float(selection.ak_per_av(config, 0.0))
+    r_dense = float(selection.ak_per_av(config, 1.0))
+    m10_map = anchor_tiles.gaia_selection(config)
+    w_star = np.zeros(n_pool, dtype=np.float64)
+    w_det = np.zeros(n_pool, dtype=np.float64)
+    tile_path = config_module.product_path(config, "population", "star", "population", "tile", region=region)
+    with h5py.File(tile_path, "r") as f:
+        for name in f.keys():
+            if not name.startswith("tile_"):
+                continue
+            grp = f[name]
+            idx = grp["STAR_INDEX"][()].astype(np.int64)
+            w = grp["W_STAR"][()].astype(np.float64)
+            a_local = grp["A_STAR_K"][()].astype(np.float64)
+            pix512 = grp["HPX_PIX_512"][()].astype(np.int64)
+            g_obs, _ = anchor_tiles.magnitudes_at_extinction(
+                a_local, pool["g_proxy"][idx], pool["ks_mag"][idx],
+                pool["k_g_diffuse"][idx], pool["k_g_dense"][idx], r_diffuse, r_dense)
+            s_det = anchor_tiles.gaia_detection_weight(g_obs, m10_map[pix512 >> 4])
+            w_star += np.bincount(idx, weights=w, minlength=n_pool)
+            w_det += np.bincount(idx, weights=w * np.where(np.isfinite(s_det), s_det, 0.0), minlength=n_pool)
+    return w_star, w_det
+
+
+def _marginal_from_pool(dist_pc, w, bin_width_mas=STAR_MARGINAL_BIN_WIDTH_MAS):
+    """`_build_star_marginal`'s histogram-and-keep-nonzero construction, on a
+    given pooled distance/weight pair."""
+    keep = w > 0.0
+    plx_mas = 1000.0 / dist_pc[keep]
+    w = w[keep]
+    lo = np.floor(plx_mas.min() / bin_width_mas) * bin_width_mas
+    hi = np.ceil(plx_mas.max() / bin_width_mas) * bin_width_mas
+    n_bins = max(1, int(round((hi - lo) / bin_width_mas)))
+    edges = lo + bin_width_mas * np.arange(n_bins + 1)
+    counts, _ = np.histogram(plx_mas, bins=edges, weights=w)
+    p_bin = counts / w.sum()
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    keep = p_bin > 0
+    return centres[keep], p_bin[keep]
+
+
+def _build_template_cube(pool, w_star, n_template):
+    """The STAR per-template parallax cube (U3 item 1): `(centres, cw, cn,
+    class_hist)`. `cw[t, k, :]` is the `W_STAR`-weighted parallax histogram
+    (on `_plx_edges`) of the simulated stars of template `t` whose log10
+    4.5 micron flux lies in the flux bins below `k` (cumulative along `k`, so
+    a window is a difference of two slices); `cn[t, k]` the same cumulative
+    count of retained stars (weight > 0); `class_hist` the all-template,
+    all-flux histogram. Also returns the flux grid's origin `f0`."""
+    keep = (w_star > 0.0) & (pool["template_index"] >= 0) & (pool["template_index"] < n_template) \
+        & np.isfinite(pool["fnu45_mjy"]) & (pool["fnu45_mjy"] > 0.0)
+    plx = 1000.0 / pool["dist_pc"][keep]
+    t = pool["template_index"][keep]
+    logf = np.log10(pool["fnu45_mjy"][keep])
+    w = w_star[keep]
+    edges = _plx_edges(plx.max())
+    n_p = edges.shape[0] - 1
+    f0 = np.floor(logf.min() / _FLUX_BIN_DEX) * _FLUX_BIN_DEX
+    n_f = int(np.floor((logf.max() - f0) / _FLUX_BIN_DEX)) + 1
+    pb = np.clip(np.searchsorted(edges, plx, side="right") - 1, 0, n_p - 1)
+    fb = np.clip(np.floor((logf - f0) / _FLUX_BIN_DEX).astype(np.int64), 0, n_f - 1)
+    flat = (t * n_f + fb) * n_p + pb
+    hist = np.bincount(flat, weights=w, minlength=n_template * n_f * n_p).reshape(n_template, n_f, n_p)
+    cnt = np.bincount(t * n_f + fb, minlength=n_template * n_f).reshape(n_template, n_f)
+    cw = np.zeros((n_template, n_f + 1, n_p), dtype=np.float64)
+    np.cumsum(hist, axis=1, out=cw[:, 1:, :])
+    cn = np.zeros((n_template, n_f + 1), dtype=np.int64)
+    np.cumsum(cnt, axis=1, out=cn[:, 1:])
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    return dict(centres=centres, cw=cw, cn=cn, class_hist=cw[:, -1, :].sum(axis=0), f0=f0, n_f=n_f)
+
+
+def _agb_luminosity_width(config):
+    """`(log10_l_sun, sigma_log10_l, n_floored)` per AGB template (U3 item 2):
+    the template's own `L_SUN`, and the standard deviation of log10 `L_SUN`
+    over the AGB templates whose shape lies within `AGB_SHAPE_NEIGHBOUR_DEX` of
+    its own (itself included) -- how far the GRAMS grid itself lets one
+    spectral shape move in luminosity. A template with no luminosity
+    neighbour (the O-rich grid carries one luminosity) is floored at the
+    standard deviation of log10 `L_SUN` over the whole AGB register, the
+    library's own luminosity spread; `n_floored` counts them."""
+    path = f"{config.inputs['sed_models']}/registers/agb_register.hdf5"
+    with h5py.File(path, "r") as f:
+        bands = [b.decode("utf-8") for b in f["bands/BAND"][:]]
+        m = f["models"]
+        log_l = np.log10(m["L_SUN"][:].astype(np.float64))
+        floor = m["FLOOR_LINEAR"][:].astype(np.float64)
+        logf = np.stack([np.log10(np.maximum(m["F_REF_%s" % b][:].astype(np.float64), floor))
+                         for b in bands], axis=1)
+    shape = logf - logf[:, bands.index("I2")][:, None]
+    d2 = ((shape[:, None, :] - shape[None, :, :]) ** 2).mean(axis=2)
+    near = d2 <= AGB_SHAPE_NEIGHBOUR_DEX ** 2
+    n_near = near.sum(axis=1)
+    mean = (near * log_l[None, :]).sum(axis=1) / n_near
+    sigma = np.sqrt((near * (log_l[None, :] - mean[:, None]) ** 2).sum(axis=1) / n_near)
+    floor_sigma = float(log_l.std())
+    floored = sigma < floor_sigma
+    return log_l, np.where(floored, floor_sigma, sigma), int(floored.sum())
+
+
 # ---------------------------------------------------------------------------
 # the term
 # ---------------------------------------------------------------------------
@@ -368,6 +568,52 @@ class GaiaTerm:
         self._x_s, self._y_s, self._z_s = _load_source_xyz(config, region)
         self._registers = {}
         self._star_marginals = {}
+        self._field_state = None
+        self._agb_width = None
+        self._dust_state = None
+
+    def _field(self, need_cube):
+        """The simulated field population's two derived objects, built in ONE
+        pass over the retained stars and the tile placements and then the stars
+        are dropped: `chance` (`(centres, p)`, U3 item 3: the parallax marginal
+        of the Gaia-DETECTED population, every star's `W_STAR` weighted again
+        by Gaia's selection function at its placed G) and, when asked, `cube`
+        (`_build_template_cube`, U3 item 1)."""
+        state = self._field_state
+        if state is None or (need_cube and state.get("cube") is None):
+            pool = _read_field_pool(self.config, self.region)
+            w_star, w_det = _pooled_star_weights(self.config, self.region, pool)
+            if not np.any(w_det > 0.0):
+                raise ValueError(f"GaiaTerm: zero Gaia-detected field-star weight in {self.region!r}")
+            state = dict(chance=_marginal_from_pool(pool["dist_pc"], w_det), cube=None)
+            if need_cube:
+                state["cube"] = _build_template_cube(pool, w_star, self._register("star")["g0_flux"].shape[0])
+            self._field_state = state
+        return state
+
+    def _chance_marginal(self):
+        return self._field(False)["chance"]
+
+    def _agb_luminosity(self):
+        if self._agb_width is None:
+            self._agb_width = _agb_luminosity_width(self.config)
+        return self._agb_width
+
+    def _dust(self):
+        """`(profile, hpx256, a_col)`: the region's canonical 3-D extinction
+        curve (`sky.derived.profile`), each source's nside-256 sightline, and
+        each source's adopted (Herschel, else Planck) extinction column, A_K
+        -- U3 item 4, read once."""
+        if self._dust_state is None:
+            granule_map_path = config_module.product_path(self.config, "granules", "sesna", "granule-map", "source")
+            columns = granule_access.per_source(self.config, self.region, granule_map_path, ["HPX_PIX_512"])
+            hpx256 = np.asarray(columns["HPX_PIX_512"], dtype=np.int64) >> 2
+            path = config_module.product_path(self.config, "sky/derived", "adopted", "column", "source",
+                                              region=self.region)
+            with h5py.File(path, "r") as f:
+                a_col = f["A_COL_K"][:].astype(np.float64)
+            self._dust_state = (profile_module.read(self.config, self.region), hpx256, a_col)
+        return self._dust_state
 
     def _register(self, cls):
         cached = self._registers.get(cls)
@@ -390,6 +636,7 @@ class GaiaTerm:
                     g0_mag=g0_mag,
                     kg_draine=m["KG_DRAINE"][:].astype(np.float64),
                     kg_whitney=m["KG_WHITNEY"][:].astype(np.float64),
+                    f_ref_i2=m["F_REF_I2"][:].astype(np.float64),
                 )
             self._registers[cls] = cached
         return cached
@@ -423,6 +670,14 @@ class GaiaTerm:
         if cls in STAR_MARGINAL_CLASSES:
             self._star_marginal(cls)
         self._star_marginal(_CHANCE_MARGINAL_CLASS)
+        # U3: the Gaia-detected chance marginal (every class), the STAR
+        # per-template cube, the AGB luminosity widths, and the dust curve the
+        # unmatched branch reads -- all built here, in the parent, once.
+        self._field(cls == "star")
+        if cls == "agb":
+            self._agb_luminosity()
+        if cls in ("star", "agb", "yso", "h2s", "gal"):
+            self._dust()
 
     def _g_s_and_a_x_block(self, rows, cls):
         """The source-and-class-level factors `ln_gamma` needs, vectorised
@@ -517,12 +772,109 @@ class GaiaTerm:
         # above.
         a_field = np.ones(rows.shape[0], dtype=np.float64)
         with np.errstate(divide="ignore", invalid="ignore"):
-            field_bins, field_p = self._star_marginal(_CHANCE_MARGINAL_CLASS)
+            field_bins, field_p = self._chance_marginal()
             z_field = (field_bins[None, :] - plx[:, None]) / sigma_eff[:, None]
             pdf_field = np.exp(-0.5 * z_field * z_field) / (sigma_eff[:, None] * _SQRT_2PI)
             a_field_good = pdf_field @ field_p
         a_field[good] = a_field_good[good]
         return matched, g_s, a_x, a_field
+
+    def _star_hist(self, t_idx, logf45):
+        """`(hist, level)`: for each template in `t_idx` `(m,)` and its
+        model flux `logf45` `(m,)` (log10 mJy at 4.5 micron), the normalised
+        parallax histogram on the cube's bins (U3 item 1) and which one was
+        used: 0 the template-and-flux window, 1 the template's own marginal
+        (fewer than `STAR_TEMPLATE_MIN_STARS` in the window), 2 the STAR
+        class marginal (fewer in the whole template, or no finite flux)."""
+        cube = self._field(True)["cube"]
+        n_f = cube["n_f"]
+        n_win = int(round(2.0 * STAR_TEMPLATE_FLUX_WINDOW_DEX / _FLUX_BIN_DEX))
+        fin = np.isfinite(logf45)
+        lo = np.rint((np.where(fin, logf45, 0.0) - STAR_TEMPLATE_FLUX_WINDOW_DEX - cube["f0"])
+                     / _FLUX_BIN_DEX).astype(np.int64)
+        lo = np.clip(lo, 0, n_f)
+        hi = np.clip(lo + n_win, 0, n_f)
+        cnt = cube["cn"][t_idx, hi] - cube["cn"][t_idx, lo]
+        t_cnt = cube["cn"][t_idx, n_f]
+        level = np.where(fin & (cnt >= STAR_TEMPLATE_MIN_STARS), 0,
+                         np.where(t_cnt >= STAR_TEMPLATE_MIN_STARS, 1, 2))
+        win = cube["cw"][t_idx, hi] - cube["cw"][t_idx, lo]
+        whole = cube["cw"][t_idx, n_f]
+        hist = np.where((level == 0)[:, None], win,
+                        np.where((level == 1)[:, None], whole, cube["class_hist"][None, :]))
+        return hist / hist.sum(axis=1)[:, None], level
+
+    def _template_block(self, rows, model_index, cls, log10_b):
+        """`(a_x, a_un, level)` for the block (U3 items 1, 2 and 4): `a_x`
+        `(n_block, n_model)` the per-template A_X of STAR (items 1) and AGB
+        (item 2) at the fitted scale `log10_b` `(n_block, n_model)` (every other
+        class, or `log10_b is None`: the class-level `(n_block, 1)` value of
+        `_g_s_and_a_x_block`); `a_un` the extinction A_K the unmatched branch
+        reads H at (item 4; NaN = the model's own fitted extinction, the old
+        reading): STAR/AGB the 3-D column curve at the template's distance, YSO/
+        H2S the source's adopted column, GAL the curve's full column; `level`
+        the STAR fallback level per (source, template) (-1 elsewhere)."""
+        rows = np.asarray(rows)
+        model_index = np.asarray(model_index)
+        n, m = rows.shape[0], model_index.shape[0]
+        matched, _, a_x_class, _ = self._g_s_and_a_x_block(rows, cls)
+        plx = self._gaia["plx_mas"][rows]
+        sigma_eff = self._gaia["e_plx_mas"][rows] * np.maximum(1.0, self._gaia["ruwe"][rows])
+        good = matched & ~(self._gaia["no_pm"][rows] | ~np.isfinite(plx) | ~np.isfinite(sigma_eff) | (sigma_eff <= 0))
+        per_template = cls in ("star", "agb") and log10_b is not None
+        a_x = a_x_class[:, None] if not per_template else np.repeat(a_x_class[:, None], m, axis=1)
+        a_un = np.full((n, m if per_template else 1), np.nan)
+        level = np.full((n, m), -1, dtype=np.int64)
+        unmatched = np.where(~matched)[0]
+        dust = self._dust() if cls in ("star", "agb", "yso", "h2s", "gal") else None
+        if cls == "star" and per_template:
+            reg = self._register("star")
+            logf = np.log10(reg["f_ref_i2"][model_index])[None, :] + np.asarray(log10_b, dtype=np.float64)
+            centres = self._field(True)["cube"]["centres"]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                for r in np.concatenate([np.where(good)[0], unmatched]):
+                    hist, level[r] = self._star_hist(model_index, logf[r])
+                    if good[r]:
+                        pdf = np.exp(-0.5 * ((centres - plx[r]) / sigma_eff[r]) ** 2) / (sigma_eff[r] * _SQRT_2PI)
+                        a_x[r] = hist @ pdf
+                    if not matched[r]:
+                        cum = np.cumsum(hist, axis=1)
+                        plx_med = centres[np.argmax(cum >= 0.5, axis=1)]
+                        a_un[r] = self._column_at(dust, rows[r], 1000.0 / plx_med)
+        elif cls == "agb" and per_template:
+            log_l, sig_l, _ = self._agb_luminosity()
+            lb = np.asarray(log10_b, dtype=np.float64)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                mu = 10.0 ** (0.5 * lb)
+                sigma_tot = np.hypot(sigma_eff[:, None], mu * (0.5 * np.log(10.0)) * sig_l[model_index][None, :])
+                a_t = np.exp(-0.5 * ((plx[:, None] - mu) / sigma_tot) ** 2) / (sigma_tot * _SQRT_2PI)
+            use = good[:, None] & np.isfinite(a_t)
+            a_x = np.where(use, a_t, a_x)
+            for r in unmatched:
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    d_pc = 1000.0 / mu[r]
+                a_un[r] = self._column_at(dust, rows[r], d_pc)
+        elif cls in ("yso", "h2s"):
+            a_un[unmatched, 0] = dust[2][rows[unmatched]]
+        elif cls == "gal":
+            profile = dust[0]
+            for r in unmatched:
+                a_un[r, 0] = self._column_at(dust, rows[r], np.array([profile.dist[-1]]))[0]
+        return a_x, a_un, level
+
+    @staticmethod
+    def _column_at(dust, row, d_pc):
+        """A_K to distance `d_pc` (array) on source `row`'s own sightline,
+        rescaled to its adopted column (`profile.a_of_d`); NaN where the
+        source has no adopted column or the distance is not finite."""
+        profile, hpx256, a_col = dust
+        col = a_col[row]
+        d_pc = np.asarray(d_pc, dtype=np.float64)
+        out = np.full(d_pc.shape, np.nan)
+        ok = np.isfinite(d_pc) & (d_pc > 0.0)
+        if np.isfinite(col) and ok.any():
+            out[ok] = profile.a_of_d(d_pc[ok], hpx256[row], total_column_ak=col)
+        return out
 
     def _xyz_block(self, rows):
         """C7 brief Part A: `(x_s, y_s, z_s)` for `rows`, straight off
@@ -532,7 +884,7 @@ class GaiaTerm:
         rows = np.asarray(rows)
         return self._x_s[rows], self._y_s[rows], self._z_s[rows]
 
-    def cell_inputs(self, rows, model_index, cls):
+    def cell_inputs(self, rows, model_index, cls, log10_b=None):
         """NONDET2 brief section 1 (NONDET.md section 8): everything
         `prior_reader._cell_sum` needs to evaluate `ln Gamma` at EACH
         CELL'S own `a*` rather than once at the fitted mark -- `G_S`/`A_X`/
@@ -546,12 +898,16 @@ class GaiaTerm:
         two ends). `x_s`/`y_s`/`z_s` (C7 brief Part A, `_xyz_block`) are
         this block's own sources' Cantat-Gaudin parameters, replacing the
         old survey-wide `(g_lim, g_rolloff)` scalars. Returns a plain
-        tuple of arrays/floats, numba-ready: `(matched, g_s, a_x, a_field,
+        tuple of arrays/floats, numba-ready: `(matched, g_s, a_x, a_field, a_un,
         g0_mag, kg_draine, kg_whitney, r_diffuse, r_dense, x_s, y_s, z_s)`.
         """
         rows = np.asarray(rows)
         model_index = np.asarray(model_index)
-        matched, g_s, a_x, a_field = self._g_s_and_a_x_block(rows, cls)
+        matched, g_s, _, a_field = self._g_s_and_a_x_block(rows, cls)
+        # U3: A_X is per source AND template for STAR/AGB (`log10_b`, this
+        # design's own fitted scale `(n_block, n_model)`), and the unmatched
+        # branch reads H at `a_un` (NaN: the cell's own extinction).
+        a_x, a_un, _ = self._template_block(rows, model_index, cls, log10_b)
         x_s, y_s, z_s = self._xyz_block(rows)
         reg = self._register(cls)
         g0_mag = reg["g0_mag"][model_index]
@@ -566,7 +922,8 @@ class GaiaTerm:
         r_diffuse = float(selection.ak_per_av(self.config, 0.0))
         r_dense = float(selection.ak_per_av(self.config, 1.0))
         return (np.ascontiguousarray(matched), np.ascontiguousarray(g_s),
-                np.ascontiguousarray(a_x), np.ascontiguousarray(a_field),
+                np.ascontiguousarray(a_x, dtype=np.float64), np.ascontiguousarray(a_field),
+                np.ascontiguousarray(a_un, dtype=np.float64),
                 np.ascontiguousarray(g0_mag, dtype=np.float64),
                 np.ascontiguousarray(kg_draine, dtype=np.float64),
                 np.ascontiguousarray(kg_whitney, dtype=np.float64), r_diffuse, r_dense,
@@ -574,13 +931,38 @@ class GaiaTerm:
                 np.ascontiguousarray(y_s, dtype=np.float64),
                 np.ascontiguousarray(z_s, dtype=np.float64))
 
-    def ln_gamma(self, rows, model_index, a, log10_b, cls):
+    def _h(self, a, log10_b, g0, g0_mag, kg_draine, kg_whitney, x_s, y_s, z_s):
+        """`H` `(n_block, n_model)`: Gaia's selection function at each model's
+        predicted G at extinction `a` and scale `log10_b` (both `(n_block,
+        n_model)`): `Gmag_h = G0MAG - 2.5 log10_b + A_G`, `A_G` the model's
+        own `a * kappa_G` at the law-ramp weight of `a`."""
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w = selection.law_dense_weight(a)
+        r_diffuse = float(selection.ak_per_av(self.config, 0.0))
+        r_dense = float(selection.ak_per_av(self.config, 1.0))
+        kappa_g = (1.0 - w) * (kg_draine[None, :] / r_diffuse) + w * (kg_whitney[None, :] / r_dense)
+        gmag = g0_mag[None, :] - 2.5 * log10_b + a * kappa_g
+        h = np.empty(gmag.shape, dtype=np.float64)
+        x_b = np.broadcast_to(x_s[:, None], gmag.shape)
+        y_b = np.broadcast_to(y_s[:, None], gmag.shape)
+        z_b = np.broadcast_to(z_s[:, None], gmag.shape)
+        _gaia_h_kernel(np.ascontiguousarray(gmag.ravel()), np.ascontiguousarray(x_b.ravel()),
+                       np.ascontiguousarray(y_b.ravel()), np.ascontiguousarray(z_b.ravel()), h.ravel())
+        # G0_FLUX = NaN (no G-band coverage, not darkness) -> H = 0 exactly; a
+        # dark model's G0_FLUX = 0 already drives Gmag to +inf and H to 0.
+        return np.where(np.isnan(g0)[None, :], 0.0, h)
+
+    def ln_gamma(self, rows, model_index, a, log10_b, cls, slope_log10b_per_ak=None):
         """`ln Gamma_{s,h}` for one block's own sources (`rows`, their row
         indices into this region's own row-aligned products, `(n_block,)`)
         over the models named by `model_index` (row positions into `cls`'s
         own register), vectorised over both sources and models: `a`/
         `log10_b`, shape `(n_block, n_model)`, are those models' own
         fitted A_K extinction and log10 brightness at each source.
+        `slope_log10b_per_ak` is the fit's ridge `d log10 B / d A_K`, which
+        the unmatched branch needs to move a model to the extinction its
+        class's distance allows (`_template_block`); `None` keeps that branch
+        at the fitted extinction.
 
         Returns an `(n_block, n_model)` float64 array, one natural-log
         multiplicative factor per source and model (the identity this
@@ -589,8 +971,10 @@ class GaiaTerm:
         """
         rows = np.asarray(rows)
         model_index = np.asarray(model_index)
-        n_model = model_index.shape[0]
-        matched, g_s, a_x, a_field = self._g_s_and_a_x_block(rows, cls)
+        matched, g_s, _, a_field = self._g_s_and_a_x_block(rows, cls)
+        a = np.asarray(a, dtype=np.float64)
+        log10_b = np.asarray(log10_b, dtype=np.float64)
+        a_x, a_un, _ = self._template_block(rows, model_index, cls, log10_b)
         x_s, y_s, z_s = self._xyz_block(rows)
 
         reg = self._register(cls)
@@ -599,60 +983,26 @@ class GaiaTerm:
         kg_draine = reg["kg_draine"][model_index]
         kg_whitney = reg["kg_whitney"][model_index]
 
-        a = np.asarray(a, dtype=np.float64)
-        log10_b = np.asarray(log10_b, dtype=np.float64)
-
         # Gmag_h: the model's own predicted Gaia G at its fitted (a,
-        # log10_b) -- G0_FLUX dimmed by A_G, `a` (A_K) carried to A_G
-        # through the model's own KG_DRAINE/KG_WHITNEY, blended at the
-        # source's own extinction-ramp weight (population.selection's
-        # diffuse/dense law blend, evaluated directly in A_K units since
-        # `a` is already A_K -- no A_V round trip needed).
-        with np.errstate(divide="ignore", invalid="ignore"):
-            w = selection.law_dense_weight(a)
-        r_diffuse = float(selection.ak_per_av(self.config, 0.0))
-        r_dense = float(selection.ak_per_av(self.config, 1.0))
-        kappa_g = (1.0 - w) * (kg_draine[None, :] / r_diffuse) + w * (kg_whitney[None, :] / r_dense)
-        a_g = a * kappa_g
+        # log10_b), `_h`.
+        h = self._h(a, log10_b, g0, g0_mag, kg_draine, kg_whitney, x_s, y_s, z_s)
 
-        # Gmag_h = G0MAG - 2.5 log10_b + A_G (W9c: the same magnitude the
-        # old flux-space round trip computed -- g_flux = G0_FLUX * B_hat *
-        # 10^(-0.4 A_G), Gmag = -2.5 log10(g_flux/ZP) -- reached without a
-        # per-pair log10 or power call over the (n_block, n_model) array;
-        # only G0MAG (once per template, at register construction) ever
-        # takes a log10).
-        gmag = g0_mag[None, :] - 2.5 * log10_b + a_g
-        h = np.empty(gmag.shape, dtype=np.float64)
-        x_b = np.broadcast_to(x_s[:, None], gmag.shape)
-        y_b = np.broadcast_to(y_s[:, None], gmag.shape)
-        z_b = np.broadcast_to(z_s[:, None], gmag.shape)
-        _gaia_h_kernel(np.ascontiguousarray(gmag.ravel()), np.ascontiguousarray(x_b.ravel()),
-                       np.ascontiguousarray(y_b.ravel()), np.ascontiguousarray(z_b.ravel()), h.ravel())
-        # G0_FLUX = NaN (no G-band coverage, not darkness) -> H = 0
-        # exactly; a dark model's G0_FLUX = 0 already drives Gmag to +inf
-        # and H to 0 through the sigmoid's own limit, no special case.
-        h = np.where(np.isnan(g0)[None, :], 0.0, h)
-
-        # FINDINGS.md S04 (round6 U04): the chance branch now carries the
-        # SAME kind of quantity (a parallax density) as the matched
-        # branch, `A_FIELD` in place of the old bare `1`, so rescaling the
-        # parallax unit no longer moves the balance between the two terms.
-        gamma_matched = (g_s[:, None] * h * a_x[:, None]
+        # FINDINGS.md S04 (round6 U04): the chance branch carries the SAME
+        # kind of quantity (a parallax density) as the matched branch.
+        gamma_matched = (g_s[:, None] * h * a_x
                           + (1.0 - g_s[:, None]) * (1.0 - h) * a_field[:, None])
-        # C7 brief Part A: an unmatched source is scored as a
-        # non-detection against this position's own completeness, capped
-        # at C_CAP the same way the band curves are, so ln Gamma never
-        # drops below ln(1/200) and never vetoes a fit on its own; a
-        # template with no optical flux (G0_FLUX = 0, H = 0 above) reads
-        # Gamma = 1 exactly, since 1 - min(0, C_CAP) = 1.
-        gamma_unmatched = 1.0 - np.minimum(h, _C_CAP)
+        # C7 brief Part A / U3 item 4: an unmatched source is scored as a
+        # non-detection against this position's own completeness, capped at
+        # C_CAP, with H read at the extinction the class's distance allows
+        # (`a_un`) on the same ridge; where that is NaN, at the fitted mark.
+        if slope_log10b_per_ak is not None and np.any(np.isfinite(a_un)):
+            a_u = np.where(np.isfinite(a_un), a_un, a)
+            lb_u = log10_b + float(np.asarray(slope_log10b_per_ak).ravel()[0]) * (a_u - a)
+            h_un = self._h(a_u, lb_u, g0, g0_mag, kg_draine, kg_whitney, x_s, y_s, z_s)
+        else:
+            h_un = h
+        gamma_unmatched = 1.0 - np.minimum(h_un, _C_CAP)
         gamma = np.where(matched[:, None], gamma_matched, gamma_unmatched)
-        # gamma = 0 is a real zero-probability model under a Gaia
-        # counterpart's own detection/non-detection evidence (e.g. the
-        # source is seen but this model's H_h says it should not be, or
-        # vice versa) -- ln(0) = -inf is the ruled likelihood, not a
-        # defect, so the divide-by-zero warning is silenced, not the
-        # value.
         with np.errstate(divide="ignore"):
             ln_g = np.log(gamma)
         return ln_g
