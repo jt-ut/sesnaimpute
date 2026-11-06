@@ -16,6 +16,11 @@ The MIPS 70 um catalogue of the same six fields (`<field>_70_cat_*`) is pulled
 the same way into `swire70_<field>.csv`, beside the IRAC files and never
 rewriting them (the IRAC table has no 70 um column and the 70 um table no IRAC
 key; `sky.derived.swire_galaxies` matches them by position).
+
+The MIPS 160 um catalogue of the same six fields (`<field>_160_cat_*`, the
+same columns as the 70 um tables) is pulled the same way into
+`swire160_<field>.csv`; table names discovered against IRSA's TAP_SCHEMA
+(`%_160_cat_%`). A present file is never rewritten (`_tap.query_csv` skips it).
 """
 
 import os
@@ -68,6 +73,19 @@ COLUMNS_70 = (
     "flux_prf", "uncf_prf", "snr", "flag",
 )
 
+# Field name -> IRSA TAP table for the SWIRE MIPS 160 um single-band catalogue.
+FIELDS_160 = {
+    "ELAIS-N1": "elaisn1_160_cat_s05",
+    "ELAIS-N2": "elaisn2_160_cat_s05",
+    "ELAIS-S1": "elaiss1_160_cat_f05",
+    "Lockman": "lockman_160_cat_s05",
+    "XMM-LSS": "xmm_160_cat_s05",
+    "CDFS": "chandra_160_cat_f05",
+}
+
+# The 160 um tables carry the same columns as the 70 um tables.
+COLUMNS_160 = COLUMNS_70
+
 
 def build(config, regions=None):
     """Writes `sky/download/swire/swire_<field>.csv` for each of the six
@@ -83,6 +101,11 @@ def build(config, regions=None):
             slug = field_name.lower().replace("-", "")
             dest_path = f"{dest_dir}/swire70_{slug}.csv"
             n_rows, n_bytes = _tap.query_csv(table, COLUMNS_70, "cntr", dest_path)
+            print(f"swire build: {field_name} ({table}) -> {dest_path}: {n_rows} rows, {n_bytes} bytes")
+        for field_name, table in FIELDS_160.items():
+            slug = field_name.lower().replace("-", "")
+            dest_path = f"{dest_dir}/swire160_{slug}.csv"
+            n_rows, n_bytes = _tap.query_csv(table, COLUMNS_160, "cntr", dest_path)
             print(f"swire build: {field_name} ({table}) -> {dest_path}: {n_rows} rows, {n_bytes} bytes")
         for i, (field_name, table) in enumerate(fields):
             slug = field_name.lower().replace("-", "")

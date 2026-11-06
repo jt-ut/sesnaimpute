@@ -4359,6 +4359,41 @@ REGISTRY[("galaxies_swire_survey", "DETECTED_P70")] = (
     "flag, 1 detected, 0 not",
     "1 where this galaxy has a source in the SWIRE 70 micron catalogue (FLUX_P70_MJY is finite), 0 where it "
     "has none (its 70 micron flux is only known to lie below LIMIT_P70_MJY).")
+for _tag, _um, _cat in (("P100", "100", "ppsc_100.csv"), ("P160", "160", "ppsc_160.csv")):
+    REGISTRY[("galaxies_swire_survey", f"COVERED_{_tag}")] = (
+        "flag, 1 covered, 0 not",
+        f"1 where Herschel PACS observed this galaxy's position in the {_um} micron band: it lies inside the "
+        f"convex hull of the {_um} micron point sources of one observation (an observation with fewer than ten "
+        "sources in the SWIRE field has no hull). 0 where it did not; such a galaxy has no information at "
+        f"{_um} micron, neither a detection nor a non-detection, and is left out of every {_um} micron statement.")
+    REGISTRY[("galaxies_swire_survey", f"FLUX_{_tag}_MJY")] = (
+        "mJy",
+        f"This galaxy's {_um} micron flux density from the Herschel PACS point source catalogue ({_cat}): the "
+        "catalogued source nearest to it within 5 arcsec; NaN where there is none (a non-detection if "
+        f"COVERED_{_tag} is 1, read LIMIT_{_tag}_MJY) and NaN where PACS did not observe the position.")
+    REGISTRY[("galaxies_swire_survey", f"SIGMA_FLUX_{_tag}_MJY")] = (
+        "mJy",
+        f"The 1-sigma uncertainty of FLUX_{_tag}_MJY: the flux divided by the catalogue's own signal-to-noise "
+        f"for that source; NaN where FLUX_{_tag}_MJY is NaN.")
+    REGISTRY[("galaxies_swire_survey", f"LIMIT_{_tag}_MJY")] = (
+        "mJy",
+        f"Where COVERED_{_tag} is 1, the flux below which the Herschel observation covering this galaxy does not "
+        f"detect sources at {_um} micron: the 10th percentile of that observation's own detections (of the "
+        "pooled detections of observations of similar depth when it has fewer than 100); the deepest "
+        f"observation if several cover the galaxy. A galaxy with no {_um} micron source has {_um} micron flux "
+        "below this number. NaN where PACS did not observe the position.")
+    REGISTRY[("galaxies_swire_survey", f"DETECTED_{_tag}")] = (
+        "flag, 1 detected, 0 not",
+        f"1 where this galaxy has a Herschel {_um} micron source within 5 arcsec (FLUX_{_tag}_MJY is finite), 0 "
+        f"otherwise; read together with COVERED_{_tag}: 0 detected and 1 covered is a non-detection, 0 and 0 is "
+        "no information.")
+    for _suffix, _dir in (("N", "north"), ("S", "south")):
+        REGISTRY[("galaxies_swire_survey", f"FLUX_{_tag}_OFFSET_{_suffix}_MJY")] = (
+            "mJy",
+            f"The chance-match test: the {_um} micron flux density of the catalogued source nearest within 5 "
+            f"arcsec of this galaxy's position moved 60 arcsec {_dir}, a position with no relation to the galaxy; "
+            f"NaN where there is none or where the moved position is not covered. The count of these over a set of "
+            f"galaxies is the count of chance matches among their FLUX_{_tag}_MJY.")
 for _name, _units, _reading in (
     ("SURVEY", "survey index, 0 HOPS, 1 eHOPS",
      "For each source in the table, which published survey it comes from: 0 the Herschel Orion Protostar Survey "

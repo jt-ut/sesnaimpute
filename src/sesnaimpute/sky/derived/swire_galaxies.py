@@ -39,6 +39,20 @@ Each galaxy also carries its 70 um flux, uncertainty and detection flag
 from the SWIRE MIPS 70 um catalogue (`_match_70um`): a galaxy with no 70 um
 source is a non-detection below its field's `LIMIT_P70_MJY`.
 
+Each galaxy also carries its 100 and 160 um flux from the Herschel PACS point
+source catalogue (HPPSC, `sky/download/hppsc/ppsc_100.csv`, `ppsc_160.csv`),
+where PACS looked (`_match_pacs`): the footprint is the union, over the
+catalogue's observations, of the convex hull of each observation's sources
+(an observation with fewer than `PACS_HULL_MIN_SOURCES` sources in the field
+is not used). A galaxy outside the footprint has no 100/160 information
+(`COVERED_P100`/`COVERED_P160` 0, flux NaN: it is neither a detection nor a
+non-detection and is left out of every 100/160 statement); inside it, a galaxy
+with an HPPSC source within `PACS_MATCH_ARCSEC` is a detection and one without
+is a non-detection below that observation's faintest catalogued source. The
+chance-match rate is carried by the same galaxies' positions shifted by
+`PACS_CHANCE_OFFSET_ARCSEC` north and south and matched the same way
+(`FLUX_P100_OFFSET_N_MJY` ...).
+
 A band is missing when its flux or its uncertainty is absent or a sentinel
 (flux <= 0 or uncertainty <= 0, the SWIRE -99 sentinel included; no
 bandwidth is ever formed from a sentinel): both the colour and the sigma
@@ -53,7 +67,7 @@ import os
 import h5py
 import numpy as np
 import pandas as pd
-from scipy.spatial import cKDTree
+from scipy.spatial import ConvexHull, cKDTree
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
@@ -104,6 +118,42 @@ SWIRE70_SNR_WINDOW = 1.0
 #: 1-sigma position uncertainties (3 sigma, the usual association radius of a
 #: Gaussian position error).
 SWIRE70_MATCH_SIGMAS = 3.0
+
+#: Herschel PACS point source catalogue files (`sky/download/hppsc`, a sibling
+#: of the SWIRE directory), one per band: (dataset suffix, file).
+HPPSC_DIR = "hppsc"
+PACS_BANDS = (("P100", "ppsc_100.csv"), ("P160", "ppsc_160.csv"))
+
+#: A PACS source is a galaxy's counterpart if it lies within this many arcsec
+#: of it (the 100 um census of studies/galaxy_100um_census_2026-11-06, 5").
+PACS_MATCH_ARCSEC = 5.0
+
+#: Two catalogued PACS sources closer than this are one source (the
+#: higher-signal one is kept): overlapping observations list a source twice.
+PACS_DEDUPE_ARCSEC = 4.0
+
+#: The chance-match test: the galaxies' positions moved this far north and
+#: south (arcsec) and matched to the same sources the same way.
+PACS_CHANCE_OFFSET_ARCSEC = 60.0
+
+#: An observation's footprint is the convex hull of its catalogued sources in
+#: the field; fewer sources than this and no hull is formed. Sources are
+#: taken within this many degrees of the field's bounding box.
+PACS_HULL_MIN_SOURCES = 10
+
+#: An observation's censoring limit is the flux below which it does not detect
+#: sources: the `PACS_LIMIT_PERCENTILE`-th percentile of its own detected
+#: fluxes in the band when it has at least `PACS_LIMIT_MIN_DETECTIONS`
+#: detections, else that percentile of the pooled detections of the
+#: observations whose faintest detection is within a factor `PACS_LIMIT_POOL_FACTOR`
+#: of its own (the factor doubled until the pool holds that many). The
+#: faintest catalogued source, the earlier limit, lies far below where the
+#: catalogue begins to detect (an observation's faintest source is a few
+#: signal-to-noise; studies/galaxy_100um_census 2026-11-06 and U1 report).
+PACS_LIMIT_PERCENTILE = 10.0
+PACS_LIMIT_MIN_DETECTIONS = 100
+PACS_LIMIT_POOL_FACTOR = 2.0
+PACS_BBOX_PAD_DEG = 0.3
 
 #: The adopted star-galaxy split (module docstring): IRAC 3.6um stellarity
 #: (`prior.gal`'s `stell_36` column) at or above this threshold is a star.
@@ -200,7 +250,147 @@ def _match_70um(path70, ra, dec, keep):
     return flux, sigma, limit, int(len(d70)), int(np.isfinite(flux[keep]).sum())
 
 
-def _read_field(path, field_index, log10_s_grid):
+def _unit_vector(ra, dec):
+    ra, dec = np.radians(ra), np.radians(dec)
+    return np.column_stack([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)])
+
+
+def _chord(arcsec):
+    return 2.0 * np.sin(np.radians(arcsec / 3600.0) / 2.0)
+
+
+class _ObsLimits(dict):
+    """Observation id -> censoring limit (mJy), computed on first use from the
+    band's detections by observation (see `PACS_LIMIT_PERCENTILE`). `record`
+    holds `(n_det, faintest, limit)` for every observation asked about."""
+
+    def __init__(self, flux_by_obs):
+        super().__init__()
+        self.flux_by_obs = flux_by_obs
+        self.faintest = {o: float(f.min()) for o, f in flux_by_obs.items()}
+        order = sorted(self.faintest, key=self.faintest.get)
+        self.sorted_obs = order
+        self.sorted_faintest = np.array([self.faintest[o] for o in order])
+        self.record = {}
+        self.printed = set()
+
+    def __missing__(self, obsid):
+        flux = self.flux_by_obs[obsid]
+        own = self.faintest[obsid]
+        if flux.size >= PACS_LIMIT_MIN_DETECTIONS:
+            pool = flux
+        else:
+            factor = PACS_LIMIT_POOL_FACTOR
+            while True:
+                lo = np.searchsorted(self.sorted_faintest, own / factor, side="left")
+                hi = np.searchsorted(self.sorted_faintest, own * factor, side="right")
+                pool = np.concatenate([self.flux_by_obs[o] for o in self.sorted_obs[lo:hi]])
+                if pool.size >= PACS_LIMIT_MIN_DETECTIONS or (lo == 0 and hi == len(self.sorted_obs)):
+                    break
+                factor *= PACS_LIMIT_POOL_FACTOR
+        value = float(np.percentile(pool, PACS_LIMIT_PERCENTILE))
+        self.record[obsid] = (int(flux.size), own, value)
+        self[obsid] = value
+        return value
+
+
+def _read_pacs(path):
+    """One HPPSC band file -> `(sources, limit_of_obs)`: the sources' `ra`,
+    `dec`, `flux` (mJy), `snr`, `obsid` (finite positive flux and signal-to-
+    noise only), and, per observation, its censoring limit (an `_ObsLimits`:
+    obsid -> mJy, the flux below which that observation does not detect)."""
+    src = pd.read_csv(path, usecols=["ra", "dec", "flux", "snr", "obsid"])
+    src = src[np.isfinite(src["flux"]) & (src["flux"] > 0) & np.isfinite(src["snr"]) & (src["snr"] > 0)]
+    flux_by_obs = {o: g.to_numpy(float) for o, g in src.groupby("obsid")["flux"]}
+    return src, _ObsLimits(flux_by_obs)
+
+
+def _match_pacs(src, limit_of_obs, ra_field, dec_field, ra, dec):
+    """The PACS flux of each galaxy of one field (`ra`, `dec`) from one HPPSC
+    band's sources. Footprint: the convex hull of each observation's
+    sources inside the field's bounding box (padded), in the tangent plane at
+    the field's mean position; an observation with fewer than
+    `PACS_HULL_MIN_SOURCES` such sources has none. A galaxy is covered if it
+    lies in any hull; its limit is the faintest source of the deepest
+    observation covering it (`limit_of_obs`). Sources within
+    `PACS_DEDUPE_ARCSEC` of a higher-signal source are dropped. Returns
+    `(covered, flux, sigma, limit, offset_n, offset_s, counts)` per galaxy:
+    `flux`/`sigma` NaN where covered and unmatched or not covered, `sigma` the
+    flux over the catalogue's signal-to-noise; `offset_n`/`offset_s` the flux
+    matched with the galaxy's position moved north/south by
+    `PACS_CHANCE_OFFSET_ARCSEC` (NaN if unmatched or if the moved position is
+    not covered); `counts` the field's sources used and dropped."""
+    ra0, dec0 = float(np.mean(ra_field)), float(np.mean(dec_field))
+    cosd = np.cos(np.radians(dec0))
+    box = (ra_field.min() - PACS_BBOX_PAD_DEG, ra_field.max() + PACS_BBOX_PAD_DEG,
+           dec_field.min() - PACS_BBOX_PAD_DEG, dec_field.max() + PACS_BBOX_PAD_DEG)
+    q = src[(src["ra"] >= box[0]) & (src["ra"] <= box[1]) & (src["dec"] >= box[2]) & (src["dec"] <= box[3])]
+    hulls, used_obs = [], []
+    for obsid, s in q.groupby("obsid"):
+        if len(s) < PACS_HULL_MIN_SOURCES:
+            continue
+        pts = np.column_stack([(s["ra"].to_numpy(float) - ra0) * cosd, s["dec"].to_numpy(float) - dec0])
+        try:
+            hull = ConvexHull(pts)
+        except Exception:
+            continue
+        hulls.append((hull.equations, pts.min(axis=0), pts.max(axis=0), limit_of_obs[obsid]))
+        used_obs.append(obsid)
+
+    def cover(r, d):
+        """(covered, limit) of positions."""
+        x, y = (r - ra0) * cosd, d - dec0
+        cov = np.zeros(r.size, dtype=bool)
+        lim = np.full(r.size, np.inf)
+        for eq, lo, hi, limit_obs in hulls:
+            near = np.flatnonzero((x >= lo[0]) & (x <= hi[0]) & (y >= lo[1]) & (y <= hi[1]))
+            if near.size == 0:
+                continue
+            inside = np.all(eq[:, 0:1] * x[near][None, :] + eq[:, 1:2] * y[near][None, :] + eq[:, 2:3] <= 1e-12, axis=0)
+            hit = near[inside]
+            cov[hit] = True
+            lim[hit] = np.minimum(lim[hit], limit_obs)
+        return cov, np.where(cov, lim, np.nan)
+
+    covered, limit = cover(ra, dec)
+    d_n, d_s = dec + PACS_CHANCE_OFFSET_ARCSEC / 3600.0, dec - PACS_CHANCE_OFFSET_ARCSEC / 3600.0
+    cov_n, _ = cover(ra, d_n)
+    cov_s, _ = cover(ra, d_s)
+
+    q = q[q["obsid"].isin(used_obs)].sort_values("snr", ascending=False).reset_index(drop=True)
+    sra, sdec = q["ra"].to_numpy(float), q["dec"].to_numpy(float)
+    drop = np.zeros(len(q), dtype=bool)
+    if len(q):
+        tree_s = cKDTree(_unit_vector(sra, sdec))
+        for i, nb in enumerate(tree_s.query_ball_point(_unit_vector(sra, sdec), _chord(PACS_DEDUPE_ARCSEC))):
+            if drop[i]:
+                continue
+            for j in nb:
+                if j > i:
+                    drop[j] = True
+    q = q[~drop].reset_index(drop=True)
+    sflux, ssnr = q["flux"].to_numpy(float), q["snr"].to_numpy(float)
+
+    def match(r, d, ok):
+        flux = np.full(r.size, np.nan)
+        sig = np.full(r.size, np.nan)
+        if len(q) == 0 or not ok.any():
+            return flux, sig
+        tree = cKDTree(_unit_vector(q["ra"].to_numpy(float), q["dec"].to_numpy(float)))
+        dist, j = tree.query(_unit_vector(r[ok], d[ok]))
+        hit = dist <= _chord(PACS_MATCH_ARCSEC)
+        where = np.flatnonzero(ok)[hit]
+        flux[where] = sflux[j[hit]]
+        sig[where] = sflux[j[hit]] / ssnr[j[hit]]
+        return flux, sig
+
+    flux, sigma = match(ra, dec, covered)
+    off_n, _ = match(ra, d_n, cov_n)
+    off_s, _ = match(ra, d_s, cov_s)
+    return covered, flux, sigma, limit, off_n, off_s, (len(q), int(drop.sum()), len(used_obs))
+
+
+def _read_field(path, field_index, log10_s_grid, pacs):
     """One SWIRE field CSV -> the surviving galaxies' rows (rule 10b: the
     catalogue is read one field at a time, never all six loaded together).
     A row survives if it is classed a galaxy by the adopted split and its
@@ -225,6 +415,32 @@ def _read_field(path, field_index, log10_s_grid):
         df["ra"].to_numpy(float), df["dec"].to_numpy(float), keep)
     print(f"swire_galaxies: field {field_index}: 70 um catalogue {n_cat70} sources, "
           f"{n_match70} matched to galaxies; limit {limit70:.2f} mJy")
+
+    # the PACS 100 and 160 um flux of each surviving galaxy (`_match_pacs`)
+    all_ra, all_dec = df["ra"].to_numpy(float), df["dec"].to_numpy(float)
+    pacs_cols = {}
+    for tag, (src, limit_of_obs) in pacs.items():
+        cov, fl, sg, lim, on, os_, (n_src, n_drop, n_obs) = _match_pacs(
+            src, limit_of_obs, all_ra, all_dec, all_ra[idx], all_dec[idx])
+        n_cov, n_det = int(cov.sum()), int(np.isfinite(fl).sum())
+        for obs, (n_d, old_lim, new_lim) in sorted(limit_of_obs.record.items()):
+            if obs not in limit_of_obs.printed:
+                limit_of_obs.printed.add(obs)
+                print(f"swire_galaxies: PACS limit {tag} obs {obs}: n_det={n_d} faintest={old_lim:.2f} "
+                      f"limit={new_lim:.2f} mJy", flush=True)
+        print(f"swire_galaxies: field {field_index}: {tag}: {n_obs} observations, {n_src} sources used "
+              f"({n_drop} duplicates dropped); {n_cov} of {idx.size} galaxies covered, {n_det} detected, "
+              f"{n_cov - n_det} censored; offset matches north {int(np.isfinite(on).sum())}, "
+              f"south {int(np.isfinite(os_).sum())}", flush=True)
+        pacs_cols.update({
+            f"COVERED_{tag}": cov.astype(np.int8),
+            f"FLUX_{tag}_MJY": fl.astype(np.float32),
+            f"SIGMA_FLUX_{tag}_MJY": sg.astype(np.float32),
+            f"LIMIT_{tag}_MJY": lim.astype(np.float32),
+            f"DETECTED_{tag}": np.isfinite(fl).astype(np.int8),
+            f"FLUX_{tag}_OFFSET_N_MJY": on.astype(np.float32),
+            f"FLUX_{tag}_OFFSET_S_MJY": os_.astype(np.float32),
+        })
 
     f1k, f2k, f3k, f4k = f1[idx], f2[idx], f3[idx], f4[idx]
     e1, e2, e3, e4 = err_mjy[idx, 0], err_mjy[idx, 1], err_mjy[idx, 2], err_mjy[idx, 3]
@@ -284,6 +500,7 @@ def _read_field(path, field_index, log10_s_grid):
         SIGMA_FLUX_P70_MJY=s70[idx].astype(np.float32),
         LIMIT_P70_MJY=np.full(idx.size, limit70, dtype=np.float32),
         DETECTED_P70=np.isfinite(f70[idx]).astype(np.int8),
+        **pacs_cols,
     ), int(is_star.sum()), int(df.shape[0])
 
 
@@ -299,13 +516,19 @@ def build(config, regions=None):
     log10_s_grid = build_log10_s_grid(fazio_path)
     with progress_module.Stage("sky.derived.swire_galaxies") as st:
         field_blocks, n_stars_removed, n_fields = [], 0, len(SWIRE_FIELD_FILES)
+        pacs = {}
+        for tag, name in PACS_BANDS:
+            pacs_path = f"{config.data_root}/sky/download/{HPPSC_DIR}/{name}"
+            if not os.path.exists(pacs_path):
+                raise FileNotFoundError(f"swire_galaxies: no HPPSC catalogue at {pacs_path!r}")
+            pacs[tag] = _read_pacs(pacs_path)
         for i, name in enumerate(SWIRE_FIELD_FILES):
             path = f"{dest_dir}/{name}"
             if not os.path.exists(path):
                 raise FileNotFoundError(
                     f"swire_galaxies: no SWIRE field catalogue at {path!r} -- run the "
                     f"'sesnaimpute.sky.download.swire.build' RUNBOOK line")
-            block, n_star, n_row = _read_field(path, i, log10_s_grid)
+            block, n_star, n_row = _read_field(path, i, log10_s_grid, pacs)
             field_blocks.append(block)
             n_stars_removed += n_star
             print(f"swire_galaxies: {name}: {n_row} rows, {n_star} stars removed, "
