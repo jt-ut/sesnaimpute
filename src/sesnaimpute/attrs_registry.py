@@ -20,6 +20,24 @@ migration pass derives `STEM` from each file name on disk and raises,
 naming the file and dataset, when a dataset it finds has no entry here.
 """
 
+#: One reading of the Gaia term, shared by every dataset that carries it (U3,
+#: briefs/farir_gaia_2026-11-06): the unmatched branch, the per-model parallax
+#: scoring of stars and AGB stars, and the Gaia-detected chance population.
+GAIA_TERM_READING = (
+    "Gaia DR3's published completeness at the source's sky pixel. An unmatched "
+    "source is scored as a non-detection, with the model placed at the extinction "
+    "its class's distance allows: for a star or an AGB star the three-dimensional "
+    "extinction curve out to the model's own distance, for a young star the "
+    "source's adopted column, for a galaxy the full column. A young star's (and an H2S source's) "
+    "parallax is scored against the cloud's parallax with the 1-sigma half-width "
+    "of the structure's 16-84 % distance interval as its depth. A matched source's "
+    "parallax is scored, for a star, against the parallaxes of simulated field "
+    "stars of the same model and 4.5 micron brightness, and, for an AGB star, "
+    "against the distance the model's luminosity implies; the chance of an "
+    "unrelated Gaia star landing nearby by coincidence is scored against the "
+    "parallaxes of the region's simulated field stars that Gaia would have "
+    "detected.")
+
 REGISTRY = {
 
     # sky.download.spitzer_coverage retired (COMPLETENESS_2026-10-20.md rule
@@ -3548,14 +3566,8 @@ REGISTRY = {
         "the others. Not a number where the fit does not record it."),
     ("posterior_classification_source", "LOG_ODDS_GAIA"): ("nats",
         "The part of LOG_ODDS_DATA that comes from Gaia, after the measured and "
-        "undetected bands: how much it moves each class's log odds. Gaia DR3's "
-        "published completeness at the source's sky pixel; an unmatched source "
-        "is scored as a non-detection, not as nothing. A matched source's chance "
-        "of an unrelated Gaia star landing nearby by coincidence is scored "
-        "against the region's simulated field-star population's own parallax "
-        "distribution, standing in for the Gaia-detected chance-counterpart "
-        "population itself, which the survey does not separately catalogue. Not "
-        "a number where the fit does not record it."),
+        "undetected bands: how much it moves each class's log odds. "
+        + GAIA_TERM_READING + " Not a number where the fit does not record it."),
     ("posterior_classification_source", "P_YSO"): ("probability",
         "Probability that the source is a young stellar object: the young stellar "
         "object column of P_CLASS."),
@@ -3789,13 +3801,7 @@ _SWEEP_FIT_READINGS = {
         "error alone and never from the completeness measurement. Never above "
         "LN_EVIDENCE_MEASURED: a band the source was not detected in can only "
         "count against a class. The class's full evidence adds Gaia to this: "
-        "Gaia DR3's published completeness at the source's sky pixel; an "
-        "unmatched source is scored as a non-detection; a matched source's "
-        "chance of an unrelated Gaia star landing nearby by coincidence is "
-        "scored against the region's simulated field-star population's own "
-        "parallax distribution, standing in for the Gaia-detected chance-"
-        "counterpart population itself, which the survey does not separately "
-        "catalogue."),
+        + GAIA_TERM_READING),
     "LN_PRIOR_MASS": ("natural log of objects per square degree",
         "The ln of the expected number per square degree of this class's objects "
         "the survey would catalogue at the source's sky pixel, from the prior "
@@ -3856,25 +3862,13 @@ _SWEEP_FIT_READINGS = {
         "extinction."),
     "TOPK_LN_GAIA": ("nats",
         "What Gaia contributed, as a log factor given the rest, integrated over "
-        "extinction: Gaia DR3's published completeness at the source's sky "
-        "pixel; an unmatched source is scored as a non-detection; a matched "
-        "source's chance of an unrelated Gaia star landing nearby by "
-        "coincidence is scored against the region's simulated field-star "
-        "population's own parallax distribution, standing in for the "
-        "Gaia-detected chance-counterpart population itself, which the survey "
-        "does not separately catalogue."),
+        "extinction: " + GAIA_TERM_READING),
     "TOPK_LN_PRIOR_ML": ("nats",
         "The prior at the best-fit point; a guide to how TOPK_LN_PRIOR_FIT splits "
         "between the prior and the fit, not an addend."),
     "TOPK_LN_GAMMA_ML": ("nats",
-        "The Gaia term at the best-fit point (Gaia DR3's published completeness "
-        "at the source's sky pixel; an unmatched source is scored as a "
-        "non-detection; a matched source's chance of an unrelated Gaia star "
-        "landing nearby by coincidence is scored against the region's "
-        "simulated field-star population's own parallax distribution, "
-        "standing in for the Gaia-detected chance-counterpart population "
-        "itself, which the survey does not separately catalogue); report-only; "
-        "the vote reading uses it."),
+        "The Gaia term at the best-fit point (" + GAIA_TERM_READING.rstrip(".")
+        + "); report-only; the vote reading uses it."),
     "TOPK_LAW": ("law position",
         "Which extinction law fits each of those five models better: 0 diffuse, 1 "
         "dense."),
