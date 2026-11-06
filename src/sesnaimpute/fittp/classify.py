@@ -451,9 +451,43 @@ def _stage_evidence(class_files, start, stop):
                           axis=1) for k in ("LN_EVIDENCE_MEASURED", "LN_EVIDENCE_NONDET"))
 
 
-def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals):
+def _catalog_rows(config, region, names):
+    """`(n,) int64`: the catalogue row of every source in the fit files'
+    own `NAME` column (the fit files follow `fittp.sweep`'s `--limit` or
+    `--rows` selection; classify follows the fit files, no option of its
+    own). Raises unless every NAME is in the region's catalogue exactly
+    once and the rows ascend (catalogue order)."""
+    cat_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+    with h5py.File(cat_path, "r") as cf:
+        cat_name = np.asarray(cf["NAME"][:])
+    n = names.shape[0]
+    if n <= cat_name.shape[0] and np.array_equal(cat_name[:n], names):
+        return np.arange(n, dtype=np.int64)
+    order = np.argsort(cat_name, kind="stable")
+    loc = np.searchsorted(cat_name[order], names)
+    loc = np.clip(loc, 0, cat_name.shape[0] - 1)
+    rows = order[loc].astype(np.int64)
+    if not np.array_equal(cat_name[rows], names) or np.unique(names).size != n:
+        raise ValueError("fittp.classify [%s]: the fit files' NAME column is not a set of distinct "
+                         "catalogue NAMEs" % region)
+    if n > 1 and np.any(np.diff(rows) <= 0):
+        raise ValueError("fittp.classify [%s]: the fit files' rows are not in catalogue order" % region)
+    return rows
+
+
+def _rows_read(ds, rows_block):
+    """`ds[rows_block]` for ascending catalogue rows, as one slice when the
+    rows are contiguous (the unselected and `--limit` cases)."""
+    if rows_block.shape[0] and rows_block[-1] - rows_block[0] + 1 == rows_block.shape[0]:
+        return ds[int(rows_block[0]):int(rows_block[-1]) + 1]
+    return ds[rows_block]
+
+
+def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals, rows):
     """One ROW_BYTES batch's own P8 rows (rule 10b): a batch-sized array
-    only, never a region-sized one."""
+    only, never a region-sized one. `start:stop` index the fit files' own
+    rows; `rows[start:stop]` are the same sources' catalogue rows."""
+    rows_block = rows[start:stop]
     m = stop - start
     log10_flux_mean_stack = np.empty((len(CLASSES), m, N_BANDS), dtype=np.float64)
     flux_cov_stack = np.empty((len(CLASSES), m, N_BANDS, N_BANDS), dtype=np.float64)
@@ -496,13 +530,13 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     map_c = np.where(flagged, -1, np.where(prior_vetoed, -2, map_c))
 
     with h5py.File(cat_path, "r") as cf:
-        flux = np.asarray(cf["FNU_MJY"][start:stop], dtype=np.float64)
-        sigma = np.asarray(cf["SIGMA_FNU_MJY"][start:stop], dtype=np.float64)
-        origin = np.array(cf["ORIGIN_FNU"][start:stop])
+        flux = np.asarray(_rows_read(cf["FNU_MJY"], rows_block), dtype=np.float64)
+        sigma = np.asarray(_rows_read(cf["SIGMA_FNU_MJY"], rows_block), dtype=np.float64)
+        origin = np.array(_rows_read(cf["ORIGIN_FNU"], rows_block))
         # the class SESNA delivered for these sources, carried through so the
         # catalogue's own label is in the product the classification is read
         # from; nothing in the pipeline reads it (rule 7).
-        class_sesna = np.asarray(cf["CLASS"][start:stop], dtype=np.int64)
+        class_sesna = np.asarray(_rows_read(cf["CLASS"], rows_block), dtype=np.int64)
     unknown = set(np.unique(class_sesna).tolist()) - set(GUTERMUTH_LABELS.index.tolist())
     if unknown:
         raise ValueError("fittp.classify: catalogue CLASS codes absent from "
@@ -697,6 +731,8 @@ def build_region(config, region, st, beta):
     # file now, so this build opens nothing it does not use.
 
     n = names.shape[0]
+    rows = _catalog_rows(config, region, names)
+    rows_file = class_files["STAR"].attrs.get("ROWS_FILE")
     path = config_module.product_path(config, "fittp", "classification", "posterior",
                                        "source", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -707,7 +743,8 @@ def build_region(config, region, st, beta):
     n_prior_vetoed = 0
     bounds = list(batches(n, ROW_BYTES))
     for bi, (start, stop) in enumerate(bounds):
-        batch = _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals)
+        batch = _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals,
+                               rows)
         batch["name"] = names[start:stop]
         part_path = _part_path(path, bi)
         _write_classify_part(part_path, batch)
@@ -722,7 +759,9 @@ def build_region(config, region, st, beta):
     if psi_file is not None:
         psi_file.close()
 
-    return dict(path=path, part_paths=part_paths, n_source=n,
+    if rows_file is not None:
+        rows_file = rows_file.decode() if isinstance(rows_file, bytes) else str(rows_file)
+    return dict(path=path, part_paths=part_paths, n_source=n, rows_file=rows_file,
                 imputed_identity_err=imputed_identity_err, n_flagged=n_flagged,
                 n_prior_vetoed=n_prior_vetoed)
 
@@ -731,7 +770,7 @@ def build_region(config, region, st, beta):
 #: live in `attrs_registry.REGISTRY`, keyed by `(_POSTERIOR_STEM, name)`.
 
 
-def join_classify_parts(path, part_paths, n_source):
+def join_classify_parts(path, part_paths, n_source, rows_file=None):
     """Joins one region's P8 part files, one part's rows at a time,
     dataset by dataset (rule 10b: never a region-sized array); removes the
     part files once written."""
@@ -751,6 +790,9 @@ def join_classify_parts(path, part_paths, n_source):
         out.attrs["GRANULE"] = "source"
         out.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
         out.attrs["SUBCLASSES"] = np.array(SUBCLASS_LABELS, dtype="S12")
+        if rows_file is not None:
+            out.attrs["ROWS_FILE"] = rows_file
+            out.attrs["N_ROWS"] = n_source
     for part_path in part_paths:
         os.remove(part_path)
 
@@ -776,7 +818,9 @@ def run_sensitivity_region(config, region, st, beta):
     # 1.5: a source-derived quantity, not read anywhere in fittp).
     density_path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
     density_file = h5py.File(density_path, "r")
-    if not np.array_equal(density_file["NAME"][:], names):
+    rows = _catalog_rows(config, region, names)
+    density_name = _rows_read(density_file["NAME"], rows)
+    if not np.array_equal(density_name, names):
         raise ValueError("fittp.classify [%s]: bmstp.density's NAME does not row-align "
                           "with the fit files' own" % region)
     f_dusty_o = float(density_file.attrs["F_DUSTY_O"])
@@ -796,7 +840,8 @@ def run_sensitivity_region(config, region, st, beta):
     bounds = list(batches(n, ROW_BYTES))
     for bi, (start, stop) in enumerate(bounds):
         m = stop - start
-        a_col_k_block = np.asarray(density_file["A_COL_K"][start:stop], dtype=np.float64)
+        a_col_k_block = np.asarray(_rows_read(density_file["A_COL_K"], rows[start:stop]),
+                                   dtype=np.float64)
         yso_floor_shift = _yso_floor_shift(a_col_k_block)
         yso_floor_factor_sum += float(np.sum(np.exp(yso_floor_shift)))
 
@@ -908,7 +953,7 @@ def build(config, regions=None, beta=0.0):
         with progress.Stage("fittp.classify", region) as st:
             result = build_region(config, region, st, beta)
             join_classify_parts(result["path"], result["part_paths"],
-                                 result["n_source"])
+                                 result["n_source"], result["rows_file"])
 
             # the joined file's own small columns (n, 6) and (n, N_SUBCLASS) --
             # not LOG10_CANDIDATE_FLUX/LOG10_FLUX_IMPUTED_COV, the two region-sized

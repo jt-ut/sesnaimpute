@@ -493,6 +493,34 @@ def _n_sources(config, region):
         return f["NAME"].shape[0]
 
 
+def _select_rows(config, region, limit=None, rows_file=None):
+    """The catalogue rows this run sweeps, `(n,) int64`, ascending, unique:
+    every row (default), the first `limit` rows (`--limit`), or exactly
+    the rows whose `NAME` is listed one per line in `rows_file`
+    (`--rows`; blank lines ignored), in catalogue order. A listed NAME
+    absent from the region's catalogue raises. `--limit` and `--rows`
+    together raise."""
+    if limit is not None and rows_file is not None:
+        raise ValueError("fittp.sweep: --limit and --rows exclude each other")
+    n_cat = _n_sources(config, region)
+    if rows_file is None:
+        return np.arange(n_cat if limit is None else min(n_cat, limit), dtype=np.int64)
+    with open(rows_file, "r") as fh:
+        wanted = [ln.strip() for ln in fh if ln.strip()]
+    path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+    with h5py.File(path, "r") as f:
+        cat_name = np.asarray(f["NAME"][:])
+    wanted = np.array(wanted, dtype=cat_name.dtype if cat_name.dtype.kind in "SU" else str)
+    sel = np.isin(cat_name, wanted)
+    if np.unique(wanted).size != wanted.size:
+        raise ValueError("fittp.sweep [%s]: %s lists a NAME more than once" % (region, rows_file))
+    if int(sel.sum()) != wanted.size:
+        missing = sorted(set(wanted.tolist()) - set(cat_name[sel].tolist()))
+        raise ValueError("fittp.sweep [%s]: %d NAME(s) of %s are not in the region's catalogue, "
+                         "first: %s" % (region, len(missing), rows_file, missing[:5]))
+    return np.nonzero(sel)[0].astype(np.int64)
+
+
 @numba.njit(parallel=True, cache=True)
 def _topk_flux_kernel(log10_flux, sorted_order, rank_position, good, out_topk_flux):
     """The top-K flux record (`TOPK_FLUX`, linear mJy), one pass per
@@ -1314,9 +1342,10 @@ def _make_pool(ctx, n_workers):
 
 
 def build_region_class(config, region, cls, st, reader, catalog,
-                        n_workers=1, limit=None, batches=None):
-    """Sweeps one {region, class}'s whole region (or, with `limit`, its
-    first `limit` catalogue rows only -- a timing/acceptance device, never
+                        n_workers=1, rows=None, batches=None):
+    """Sweeps one {region, class}'s whole region (or, with `rows`, only
+    those catalogue rows -- `_select_rows`: `--limit`'s first rows or
+    `--rows`' named ones; a timing/acceptance/verification device, never
     a default) one source at a time, over a `multiprocessing` pool of
     `n_workers` (section 1.3; IMPLEMENTATION_BMSTP_DRAFT.md section 4 row
     2.4; PARALLEL brief). Sources are grouped into batches of `[fit]
@@ -1352,17 +1381,19 @@ def build_region_class(config, region, cls, st, reader, catalog,
     lib_path = config_module.product_path(config, "fittp", "check", "library-resolution", "survey")
     sigma_lib_l = likelihood.sigma_lib_by_class(lib_path)[cls]
 
-    n_source = catalog["flux"].shape[0]
+    n_region = catalog["flux"].shape[0]
+    if rows is None:
+        rows = np.arange(n_region, dtype=np.int64)
     # C7 rework: the atlas lookup covers the FULL region, row-aligned to
-    # every other per-source array here, regardless of `--limit` (a
-    # timing/acceptance device on the sweep loop below, never on what
-    # this reads) -- captured before `n_source` is clipped.
-    ln_prior_mass_by_source, prior_mass_matched = _prior_mass_by_source(config, region, cls, n_source)
-    if limit is not None:
-        n_source = min(n_source, limit)
+    # every other per-source array here (workers read every per-source
+    # array, the reader and the Gaia term by CATALOGUE row), regardless
+    # of `--limit`/`--rows` (which select only what the sweep loop below
+    # dispatches, never what this reads).
+    ln_prior_mass_by_source, prior_mass_matched = _prior_mass_by_source(config, region, cls, n_region)
+    n_source = int(rows.shape[0])
     # the unmapped count `st.done` reports is over THIS run's own swept
-    # rows only (0..n_source-1 post-`--limit`), not the whole region.
-    n_prior_mass_unmapped = int(np.count_nonzero(~prior_mass_matched[:n_source]))
+    # rows only, not the whole region.
+    n_prior_mass_unmapped = int(np.count_nonzero(~prior_mass_matched[rows]))
 
     # item 8's memory disclosure: printed once, at the top of this stage, from
     # closed-form cost plus one documented constant -- no RAM measurement, no
@@ -1411,7 +1442,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
     # arguments; an explicit signature list would be a second thing to keep
     # right). `_source_task` catches its own failures, so this cannot raise.
     numba.set_num_threads(1)
-    _source_task(batch_bounds[0][0])
+    _source_task(int(rows[batch_bounds[0][0]]))
 
     # Forked below every load above, and below the warm -- the threading layer
     # pinned at import is fork-safe by numba's own contract.
@@ -1422,17 +1453,18 @@ def build_region_class(config, region, cls, st, reader, catalog,
                 continue
             m = bstop - bstart
             arrays = _new_batch_arrays(m, n_sub, topk)
-            for r in pool.imap(_source_task, range(bstart, bstop), chunksize=_IMAP_CHUNKSIZE):
-                _fill_batch_row(arrays, r, r["i"] - bstart)
-            batch = _assemble_batch(arrays, catalog["name"][bstart:bstop])
+            for k, r in enumerate(pool.imap(_source_task, rows[bstart:bstop].tolist(),
+                                            chunksize=_IMAP_CHUNKSIZE)):
+                _fill_batch_row(arrays, r, k)
+            batch = _assemble_batch(arrays, catalog["name"][rows[bstart:bstop]])
             _write_part(_part_path(path, bi), batch, cls)
             st.tick(bi + 1, len(batch_bounds), "batches")
 
-    return _summary(config, region, cls, n_source, n_model,
+    return _summary(config, region, cls, rows, n_model,
                     n_prior_mass_unmapped=n_prior_mass_unmapped)
 
 
-def _summary(config, region, cls, n_source, n_model, n_prior_mass_unmapped=None):
+def _summary(config, region, cls, rows, n_model, n_prior_mass_unmapped=None):
     """The numbers `join_parts` and the report need for one {region,
     class}, shared by a sweep and by a join-only call (`build`'s
     `join_only`), which sweeps nothing and so has no sweep to take them
@@ -1445,8 +1477,9 @@ def _summary(config, region, cls, n_source, n_model, n_prior_mass_unmapped=None)
     weights_file = config_module.product_path(
         config, "bmstp", "weights", lib, granule, region=(region if granule == "region" else None))
     batch_size = config.batch_size
+    n_source = int(rows.shape[0])
     return dict(
-        path=path, region=region, n_source=n_source, n_model=n_model,
+        path=path, region=region, rows=rows, n_source=n_source, n_model=n_model,
         n_batches=(n_source + batch_size - 1) // batch_size,
         subclasses=definitions.SUBCLASSES_OF[cls], library=definitions.CLASS_REGISTER[cls],
         density_file=density_file, weights_file=weights_file,
@@ -1499,6 +1532,7 @@ def join_parts(summary, topk, config):
     path = summary["path"]
     region = summary["region"]
     n_source = summary["n_source"]
+    rows = summary["rows"]
     n_batches = summary["n_batches"]
     found = _discover_parts(path)
     expected = set(range(n_batches))
@@ -1545,7 +1579,7 @@ def join_parts(summary, topk, config):
                         "for the catalogue slice [%d:%d) of %s -- rerun that batch before joining"
                         % (summary.get("cls"), bi, part_path, m, bstop - bstart, bstart, bstop, region))
                 part_name = pf["NAME"][:]
-                expected_name = np.asarray(catalog_name[bstart:bstop])
+                expected_name = np.asarray(catalog_name[rows[bstart:bstop]])
                 if not np.array_equal(part_name, expected_name):
                     raise RuntimeError(
                         "fittp.sweep.join_parts [%s]: part %d (%s) NAME does not match %s's own "
@@ -1578,6 +1612,9 @@ def join_parts(summary, topk, config):
         out.attrs["K"] = topk
         out.attrs["WEIGHTS_FILE"] = summary["weights_file"]
         out.attrs["DENSITY_FILE"] = summary["density_file"]
+        if summary.get("rows_file") is not None:
+            out.attrs["ROWS_FILE"] = os.path.basename(summary["rows_file"])
+            out.attrs["N_ROWS"] = n_source
     os.replace(tmp_path, path)
     for part_path in part_paths:
         os.remove(part_path)
@@ -1589,13 +1626,15 @@ def join_parts(summary, topk, config):
 
 
 def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=None,
-          join=True, join_only=False):
+          join=True, join_only=False, rows_file=None):
     """Writes `fittp/fit/<CLS>_fit_source__R.hdf5` for every {region,
     class} pair (default all thirty regions, all seven classes; section
     1.3, IMPLEMENTATION_BMSTP_DRAFT.md P7). `limit` restricts every
     region to its first `limit` catalogue rows -- a timing/acceptance
     device for a class whose prior read does not fit the run budget on
-    the whole region, never a default. `n_workers` sizes the per-{region,
+    the whole region, never a default. `rows_file` (`--rows`) instead
+    restricts every region to the catalogue rows whose NAMEs it lists,
+    one per line (products hold only those rows; excludes `limit`). `n_workers` sizes the per-{region,
     class} multiprocessing pool (item 6: `--workers` on the CLI, falling
     back to `[fittp] workers`, default 1 -- never auto-detected, never
     capped by the code). `batches`, given, restricts every {region, class}
@@ -1616,21 +1655,20 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
     class_codes = classes if classes is not None else list(CLASSES)
     t0 = time.time()
     for region in region_names:
+        rows = _select_rows(config, region, limit=limit, rows_file=rows_file)
         catalog = None if join_only else _load_region_catalog(config, region)
         for cls in class_codes:
             with progress.Stage("fittp.sweep.%s" % cls, region) as st:
                 if join_only:
-                    n_source = _n_sources(config, region)
-                    if limit is not None:
-                        n_source = min(n_source, limit)
-                    summary = _summary(config, region, cls, n_source,
+                    summary = _summary(config, region, cls, rows,
                                        _register(config, cls, region)[0].shape[0])
                 else:
                     reader = prior_reader.load(config, region, cls)
                     summary = build_region_class(config, region, cls, st, reader,
-                                                  catalog, n_workers=n_workers, limit=limit,
+                                                  catalog, n_workers=n_workers, rows=rows,
                                                   batches=batches)
                 summary["cls"] = cls
+                summary["rows_file"] = rows_file
                 if not join:
                     st.done(None, n=summary["n_source"], n_batches=summary["n_batches"],
                             parts_written=(len(batches) if batches is not None else summary["n_batches"]),
@@ -1663,6 +1701,9 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=None,
                          help="sweep only the first LIMIT catalogue rows of each region "
                               "(a timing/acceptance device, never a default)")
+    parser.add_argument("--rows", default=None, metavar="FILE",
+                         help="sweep exactly the catalogue rows whose SESNA NAME is listed in FILE "
+                              "(one per line), in catalogue order; excludes --limit")
     parser.add_argument("--workers", type=int, default=None,
                          help="the per-{region, class} multiprocessing pool size, one task "
                               "per source; falls back to [fittp] workers (default 1). Never "
@@ -1684,6 +1725,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.no_join and args.join_only:
         parser.error("--no-join and --join-only exclude each other")
+    if args.rows is not None and args.limit is not None:
+        parser.error("--rows and --limit exclude each other")
     cfg = config_module.load(args.config)
     if args.n_jobs is not None:
         cfg = dataclasses.replace(cfg, n_jobs=args.n_jobs)
@@ -1692,4 +1735,4 @@ if __name__ == "__main__":
     n_workers = args.workers if args.workers is not None else cfg.fittp_workers
     build(cfg, regions=args.regions, classes=args.classes, limit=args.limit,
           n_workers=n_workers, batches=args.batches,
-          join=not args.no_join, join_only=args.join_only)
+          join=not args.no_join, join_only=args.join_only, rows_file=args.rows)
