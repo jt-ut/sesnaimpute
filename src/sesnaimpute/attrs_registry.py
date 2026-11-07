@@ -4364,12 +4364,16 @@ for _name, _units, _reading in (
      "For each source in the table, which published survey it comes from: 0 the Herschel Orion Protostar Survey "
      "(Furlan et al. 2016), 1 its Aquila extension (Pokhrel et al. 2023). These are published HOPS and eHOPS data, "
      "so a comparison of a classification with HOPS and eHOPS is not independent of anything built from this "
-     "table on the far-infrared axis. Every ratio is built from the two surveys' own published 70 and 4.5 micron "
-     "fluxes (never SESNA's). A source observed at 70 micron and not detected is kept as a ratio below a limit, "
-     "taken as its survey's faintest published 70 micron detection (HOPS 8.2 mJy, eHOPS 157 mJy), since neither "
-     "table gives a limit; the 43 eHOPS sources with no 70 micron entry are left out (the table does not say "
-     "whether they were undetected or off the map). The table holds 446 sources, 423 detected: Class 0, I and "
-     "flat 430 (409 detected, 21 not), Class II 16 (14 detected, 2 not). Neither survey has a Class III or "
+     "table on the far-infrared axis. Every ratio is built from the two surveys' own published 70, 100 or 160 and "
+     "4.5 micron fluxes (never SESNA's). A source observed in a band and not detected is kept as a ratio below a "
+     "limit, taken as its survey's faintest published detection in that band (70 micron: HOPS 8.2 mJy, eHOPS "
+     "157 mJy; 160 micron: HOPS 32 mJy), since neither table gives a limit. A source with no flux in a band is "
+     "left out of that band's census (OBSERVED_Pb is 0) when the table does not say it was observed and "
+     "undetected: every eHOPS blank (31 at 70, 12 at 100, 40 at 160 micron of its 145 sources) and every HOPS "
+     "100 micron blank (80 of 332). The table holds 477 sources (HOPS 332, eHOPS 145): Class 0, I and flat 460 "
+     "(409 detected at 70 micron), Class II 17 (14 detected at 70 micron). The 70 micron census is 446 sources, "
+     "423 detected, 23 not (21 Class 0, I or flat, 2 Class II); the 100 micron census 385 detected; the 160 "
+     "micron census 410 detected and 27 not. Neither survey has a Class III or "
      "transition-disk class, so the YSO weights give those classes no far-infrared statement: their templates are "
      "weighted as before (factor 1). The Dunham et al. 2015 census behind the brightness and class statements "
      "is not used for this ratio: it gives a 70 micron flux (18 arcsec beam) for 618 of its 2966 young stars and "
@@ -4386,9 +4390,8 @@ for _name, _units, _reading in (
      "The source's published measured 4.5 micron flux density."),
     ("DETECTED_P70", "flag, 1 detected, 0 not",
      "1 where the source is detected at 70 micron, 0 where it was observed and not detected (its ratio is then "
-     "only known to lie below LOG10_R_LIMIT). A source the survey did not observe at 70 micron, and for eHOPS a "
-     "source with no 70 micron entry (its table does not say whether it was undetected or off the map), is not in "
-     "the table."),
+     "only known to lie below LOG10_R_LIMIT) or is not in the 70 micron census (OBSERVED_P70 is 0: for eHOPS a "
+     "source with no 70 micron entry, whose table does not say whether it was undetected or off the map)."),
     ("LIMIT_P70_MJY", "mJy",
      "For every source, the faintest 70 micron flux its survey publishes for any detected source (HOPS and eHOPS "
      "separately): the stand-in for the survey's depth, since neither table gives a limit for a non-detection."),
@@ -4402,6 +4405,49 @@ for _name, _units, _reading in (
      "its LOG10_R is below this number."),
 ):
     REGISTRY[("farir_hops_survey", _name)] = (_units, _reading)
+REGISTRY[("farir_hops_survey", "DISTANCE_PC")] = (
+    "pc",
+    "The distance the source's survey quotes its published fluxes at: 400 pc for HOPS (Orion), 436 pc for eHOPS "
+    "(Aquila).")
+REGISTRY[("farir_hops_survey", "LOG10_F_I2_1KPC")] = (
+    "log10 mJy",
+    "log10 of the source's published 4.5 micron flux density scaled from its survey's distance to 1 kpc (flux times "
+    "the square of the distance in kpc), the distance the model templates' reference fluxes are quoted at. The "
+    "published flux is not corrected for extinction. It is the brightness the census is split on when the "
+    "far-infrared ratio of young stars is compared at equal brightness.")
+for _b in (70, 100, 160):
+    REGISTRY[("farir_hops_survey", f"OBSERVED_P{_b}")] = (
+        "flag, 1 in the census, 0 not",
+        f"1 where the source is in the {_b} micron census: detected there, or observed there and not detected. 0 "
+        f"where the survey's table gives no {_b} micron flux and does not say the source was observed and not "
+        f"detected (an unobserved source, or for eHOPS any blank, and for HOPS at 100 micron any blank, because "
+        f"the table cannot tell the two apart); such a source has no {_b} micron ratio.")
+    if _b == 70:
+        continue
+    REGISTRY[("farir_hops_survey", f"DETECTED_P{_b}")] = (
+        "flag, 1 detected, 0 not",
+        f"1 where the source is detected at {_b} micron, 0 where it was observed there and not detected (its ratio "
+        f"LOG10_R{_b} is then only known to lie below LOG10_R{_b}_LIMIT) or is not in the {_b} micron census "
+        f"(OBSERVED_P{_b} is 0).")
+    REGISTRY[("farir_hops_survey", f"FLUX_P{_b}_MJY")] = (
+        "mJy", f"The source's published {_b} micron flux density; NaN where it is not detected at {_b} micron.")
+    REGISTRY[("farir_hops_survey", f"SIGMA_FLUX_P{_b}_MJY")] = (
+        "mJy", f"The published 1-sigma uncertainty of FLUX_P{_b}_MJY; NaN where that is NaN.")
+    REGISTRY[("farir_hops_survey", f"LIMIT_P{_b}_MJY")] = (
+        "mJy",
+        f"For every source, the faintest {_b} micron flux its survey publishes for any detected source (HOPS and "
+        f"eHOPS separately): the stand-in for the survey's depth, since neither table gives a limit.")
+    REGISTRY[("farir_hops_survey", f"LOG10_R{_b}")] = (
+        "dex",
+        f"log10 of the source's {_b} micron flux over its 4.5 micron flux. NaN where the source is not detected at "
+        f"{_b} micron.")
+    REGISTRY[("farir_hops_survey", f"SIGMA_LOG10_R{_b}")] = (
+        "dex", f"The 1-sigma uncertainty of LOG10_R{_b} from the two fluxes' published uncertainties; NaN where "
+               f"LOG10_R{_b} is NaN.")
+    REGISTRY[("farir_hops_survey", f"LOG10_R{_b}_LIMIT")] = (
+        "dex",
+        f"For every source, log10 of LIMIT_P{_b}_MJY over its 4.5 micron flux. For a source observed and not "
+        f"detected at {_b} micron its LOG10_R{_b} is below this number.")
 REGISTRY[("galz_weights_survey", "W")] = (
     "dimensionless",
     "For every galaxy template and every cell of LOG10_F45_CENTERS, how common galaxies like this template are "

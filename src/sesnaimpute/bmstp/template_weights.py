@@ -582,16 +582,65 @@ YSO_FARIR_CENSUS_CLASSES = (("C0", "CI", "FLAT"), ("CII",), ())
 FARIR_PRINT_QUANTILES = (0.16, 0.5, 0.84)
 
 
+#: The three PACS bands of the young-star far-infrared factor: the register's
+#: band name and the census product's suffix on `LOG10_R`, `OBSERVED_P`,
+#: `DETECTED_P` (the 70 micron column carries no suffix on `LOG10_R`).
+YSO_FARIR_BANDS = (("P70", 70, ""), ("P100", 100, "100"), ("P160", 160, "160"))
+
+#: The bands the production factor applies. 100 and 160 um are censused and
+#: carried in the product; the factor applies 70 um only until a joint estimator
+#: exists -- the one-band-at-a-time forms over-count the collinear ratios (batch
+#: farir_gaia_2026-11-06 REPORT_U2.md).
+FARIR_BANDS = ("P70",)
+
+#: The census is split into brightness slices of this width, in log10 of the
+#: 4.5 micron flux at 1 kpc (the templates' own `C_THETA` axis); a slice is
+#: pooled outward, one slice either side at a time, until it holds this many
+#: detections in the group and band.
+FARIR_SLICE_DEX = 0.5
+FARIR_SLICE_MIN_DETECTIONS = 40
+
+#: A disc-group census (Class II) with fewer detections than this in the
+#: group's window is pooled with the protostellar group's census in the same
+#: band and window, and no factor on a census (detected + censored) smaller
+#: than this falls below `exp(FARIR_SMALL_CENSUS_FLOOR_LN)`.
+FARIR_DISK_POOL_BELOW = 50
+FARIR_SMALL_CENSUS_FLOOR_LN = -5.0
+
+#: The share of a slice printed against the census: `r70 >= GALZ_RED_R` in the
+#: slice whose base edges are these.
+FARIR_REPORT_SLICE = (-1.0, -0.5)
+
+#: The bands are cycled (iterative proportional fitting) until, in every
+#: group, band and brightness slice, the weighted library's share above
+#: `GALZ_RED_R` is within `FARIR_IPF_TOLERANCE` binomial errors of its census's
+#: share, or after this many passes.
+FARIR_IPF_MAX_PASSES = 10
+FARIR_IPF_TOLERANCE = 2.0
+
+#: A template whose weight (soft group fraction x brightness weight x the earlier
+#: bands' factors) is below this fraction of its window's total weight is
+#: numerically absent from the library the next band's factor divides by; its
+#: factor is 1.
+FARIR_NEGLIGIBLE_WEIGHT = 1.0e-12
+
+
 def _farir_census(config):
-    """`(klass, log10_r, detected, log10_r_limit)` of the HOPS and eHOPS
-    sources (`sky.derived.farir_census`): the class label, `LOG10_R` (NaN
-    where not detected at 70 micron), the detection flag and `LOG10_R_LIMIT`
-    (the ratio a non-detection lies below)."""
+    """`(klass, log10_f, bands)` of the HOPS and eHOPS sources
+    (`sky.derived.farir_census`): the class label, the 4.5 micron flux at 1
+    kpc (`LOG10_F_I2_1KPC`) and, per band of `YSO_FARIR_BANDS`, `(observed,
+    log10_r, detected, log10_r_limit)` -- `observed` the source is in that
+    band's census (detected, or observed and not detected), `log10_r` NaN where
+    not detected, `log10_r_limit` the ratio a non-detection lies below."""
     path = config_module.product_path(config, *FARIR_CENSUS_PATH_ARGS)
     with h5py.File(path, "r") as f:
         klass = np.char.decode(f["CLASS"][:].astype("S"), "utf-8")
-        return (klass, f["LOG10_R"][:].astype(np.float64), f["DETECTED_P70"][:] == 1,
-                f["LOG10_R_LIMIT"][:].astype(np.float64))
+        log10_f = f["LOG10_F_I2_1KPC"][:].astype(np.float64)
+        bands = {}
+        for _band, micron, tag in YSO_FARIR_BANDS:
+            bands[micron] = (f[f"OBSERVED_P{micron}"][:] == 1, f[f"LOG10_R{tag}"][:].astype(np.float64),
+                             f[f"DETECTED_P{micron}"][:] == 1, f[f"LOG10_R{tag}_LIMIT"][:].astype(np.float64))
+    return klass, log10_f, bands
 
 
 def _silverman_bandwidth(x):
@@ -607,90 +656,290 @@ def _weighted_quantiles(x, w, q):
     return np.interp(np.asarray(q) * cum[-1], cum, x[order])
 
 
+def _template_log10_r_band(reg, band):
+    """`(r, defined)` for the register's `band` (`P70`, `P100`, `P160`):
+    `r = log10(F_REF_band / F_REF_I2)`, NaN and `defined` False where either
+    reference flux is zero, negative or not finite."""
+    fb, f2 = reg["f_ref"][band], reg["f_ref"]["I2"]
+    defined = np.isfinite(fb) & (fb > 0) & np.isfinite(f2) & (f2 > 0)
+    r = np.full(fb.size, np.nan)
+    r[defined] = np.log10(fb[defined] / f2[defined])
+    return r, defined
+
+
+def _farir_windows(log10_f_census, det_census, n_slices, inner_edges):
+    """The brightness slices pooled into disjoint blocks of neighbouring base
+    slices, each block holding at least `FARIR_SLICE_MIN_DETECTIONS` detections
+    of the census (`det_census`: the detected sources of the group and band):
+    scanning from the faintest slice, a block is closed as soon as it holds that
+    many, and a short remainder at the bright end joins the last block. Returns
+    `(blocks, census_slice)`, `blocks` a list of `(lo, hi)` base-slice ranges
+    (both inclusive) and `census_slice` the base slice of every census source.
+    Disjoint blocks make the per-block census statements consistent with one
+    another, which overlapping windows are not."""
+    census_slice = np.digitize(log10_f_census, inner_edges)
+    per_slice = np.bincount(census_slice[det_census], minlength=n_slices)
+    blocks, lo, acc = [], 0, 0
+    for j in range(n_slices):
+        acc += per_slice[j]
+        if acc >= FARIR_SLICE_MIN_DETECTIONS:
+            blocks.append((lo, j))
+            lo, acc = j + 1, 0
+    if lo < n_slices:
+        if blocks:
+            blocks[-1] = (blocks[-1][0], n_slices - 1)
+        else:
+            blocks.append((0, n_slices - 1))
+    return blocks, census_slice
+
+
+def _farir_active_bands():
+    """`YSO_FARIR_BANDS` entries the factor applies (`FARIR_BANDS`)."""
+    return tuple(b for b in YSO_FARIR_BANDS if b[0] in FARIR_BANDS)
+
+
+def _farir_worst_z(bands, frac_g, w_pre, f_g):
+    """The largest |library share - census share| / binomial error of the
+    share above `GALZ_RED_R`, over the bands and slices of one group; the
+    library is the group's templates of the slice weighted by `frac_g w_pre
+    f_g`."""
+    worst = 0.0
+    for bd in bands.values():
+        for rec in bd["slices"]:
+            if rec["skipped"]:
+                continue
+            idx = rec["base_def"]
+            w = frac_g[idx] * w_pre[idx] * f_g[idx]
+            if w.sum() <= 0:
+                continue
+            share = w[bd["r_theta"][idx] >= GALZ_RED_R].sum() / w.sum()
+            worst = max(worst, abs(share - rec["census_share"]) / max(rec["census_err"], 1e-9))
+    return float(worst)
+
+
 def _yso_farir(config, reg, frac, sub_idx, w_pre):
     """Per census group, the far-infrared factor of every YSO template (spec
-    sec 1.4, 5.5): `f_g(theta) = p_g(r_theta) / n_g(r_theta)`, `p_g` the
-    censored kernel density estimate (`_censored_r_density`, Silverman
-    bandwidth on the group's detections) of `r = log10(F70 / F4.5)` over the
-    group's HOPS and eHOPS sources (`YSO_FARIR_CENSUS_CLASSES`) and `n_g` the
-    library's density of templates in `r`, each template counted by its soft
-    fraction in the group (`FRAC_<subclass>`) and by its brightness-and-
-    viewing-angle weight `w_pre` (the other two population statements, which
-    already select on `r`: counting the templates as they will be weighted
-    makes the weighted library's `r` distribution the census's), the same
-    Gaussian kernel. A
-    group with no census has `f = 1`. A template whose `r` is undefined (zero
-    or non-finite `F_REF_P70`, or `F_REF_I2` not positive) is left out of `n_g`
-    and given the mean `f_g` of the group's defined templates (no
-    far-infrared evidence either way; owner 2026-10-29: every template has a defined 70 micron flux, so these are
-    the templates dark at 4.5 micron).
-    Returns `(f, info)`: `f` `(n_model, 3)`; `info` one dict per group with
-    the numbers `yso_farir_report` prints."""
-    r_theta, defined = _template_log10_r(reg)
-    klass, log10_r, detected, r_limit = _farir_census(config)
-    n_model = r_theta.size
+    sec 1.4, 5.5): the product over the three PACS bands (70, 100, 160 micron)
+    of `f_gb(theta) = p_gb(r_theta | s) / n_gb(r_theta | s)`, `s` the template's
+    brightness slice (`log10 f_ref,4.5` in `FARIR_SLICE_DEX` slices, the
+    census's own 4.5 micron flux scaled from its survey's distance to the
+    templates' 1 kpc), `r = log10(F_band / F4.5)`. `p_gb` is the censored kernel
+    density estimate (`_censored_r_density`, Silverman bandwidth on the
+    detections) of `r` over the group's HOPS and eHOPS sources
+    (`YSO_FARIR_CENSUS_CLASSES`) in the slice -- pooled outward in brightness,
+    one slice either side at a time, until it holds `FARIR_SLICE_MIN_DETECTIONS`
+    detections in the band; `n_gb` is the library's density in `r` over the
+    templates of the same window, each counted by its soft fraction in the
+    group (`FRAC_<subclass>`), its brightness-and-viewing-angle weight
+    `w_pre` and every factor so far: the bands are cycled 70, 100, 160, each
+    update `p / n_current` with `n_current` the library as weighted now
+    (iterative proportional fitting; independent factors double count the
+    collinear ratios, one chain pass leaves only the last band exact), until
+    every share above `GALZ_RED_R` is within `FARIR_IPF_TOLERANCE` binomial
+    errors of its census's or `FARIR_IPF_MAX_PASSES` passes; the floor
+    `exp(FARIR_SMALL_CENSUS_FLOOR_LN)` is on the accumulated factor of a template in a
+    small-census window), the same Gaussian kernel. The disc group (Class II + transition disk) has a census of 14
+    detections at 70 micron, 8 at 100 and 14 at 160: where its census in the
+    window holds fewer than `FARIR_DISK_POOL_BELOW` detections it is pooled with
+    the protostellar group's census of the same band and window (the census
+    then states the far-infrared ratio of young stars of that brightness, not
+    of discs), and no factor on a census (detected + censored) smaller than
+    `FARIR_DISK_POOL_BELOW` falls below `exp(FARIR_SMALL_CENSUS_FLOOR_LN)`. A group with no
+    census (Class III) has `f = 1`. A template whose `r` is undefined in a band
+    (zero or non-finite reference flux in the band, or `F_REF_I2` not positive)
+    is left out of that band's `n_gb` and given the mean `f_gb` of the defined
+    templates of its brightness slice (no far-infrared evidence either way).
+    Returns `(f, info)`: `f` `(n_model, 3)`; `info` one dict per group with the
+    numbers `yso_farir_report` prints."""
+    c_theta = _c_theta(reg)
+    klass, log10_f, census = _farir_census(config)
+    lo_edge = np.floor(np.nanmin(log10_f) / FARIR_SLICE_DEX) * FARIR_SLICE_DEX
+    hi_edge = np.ceil(np.nanmax(log10_f) / FARIR_SLICE_DEX) * FARIR_SLICE_DEX
+    inner_edges = np.arange(lo_edge, hi_edge + 0.5 * FARIR_SLICE_DEX, FARIR_SLICE_DEX)
+    n_slices = inner_edges.size + 1                  # open at both ends
+    tmpl_slice = np.digitize(c_theta, inner_edges)
+    n_model = c_theta.size
+    proto_codes = YSO_FARIR_CENSUS_CLASSES[0]
     f = np.ones((n_model, len(YSO_CENSUS_GROUPS)))
     info = []
     for g, (labels, codes) in enumerate(zip(YSO_CENSUS_GROUPS, YSO_FARIR_CENSUS_CLASSES)):
         frac_g = frac[:, [sub_idx[sub] for sub in labels]].sum(axis=1)
-        entry = dict(labels=sorted(labels), codes=codes, n_undefined=int(((frac_g > 0.5) & ~defined).sum()),
-                     n_group=int((frac_g > 0.5).sum()))
-        if codes:
-            in_group = np.isin(klass, codes)
-            r_det, limit = log10_r[in_group & detected], r_limit[in_group & ~detected]
-            h = _silverman_bandwidth(r_det)
-            grid = _r_grid(min(np.nanmin(r_theta), r_det.min(), limit.min()),
-                           max(np.nanmax(r_theta), r_det.max()), h)
-            q, cdf, n_iter = _censored_r_density(grid, r_det, np.full(r_det.size, h), limit)
-            step = grid[1] - grid[0]
-            weight = np.where(defined, frac_g * w_pre, 0.0)
-            edges = np.append(grid - 0.5 * step, grid[-1] + 0.5 * step)
-            counts, _ = np.histogram(np.where(defined, r_theta, grid[0]), bins=edges, weights=weight)
-            n_g = gaussian_filter1d(counts, h / step, mode="constant") / (step * weight.sum())
-            ratio = (np.interp(r_theta, grid, q) / np.maximum(np.interp(r_theta, grid, n_g), 1e-300))
-            f[:, g] = np.where(defined, ratio, (weight * np.where(defined, ratio, 0.0)).sum() / weight.sum())
-            entry.update(n_det=int(r_det.size), n_cens=int(limit.size), bandwidth=float(h),
-                         n_iter=n_iter, grid=grid, q=q, cdf=cdf, r_det=r_det)
+        entry = dict(labels=sorted(labels), codes=codes, n_group=int((frac_g > 0.5).sum()),
+                     inner_edges=inner_edges, bands={}, n_undefined={})
         info.append(entry)
+        if not codes:
+            continue
+        in_group = np.isin(klass, codes)
+        in_proto = np.isin(klass, proto_codes)
+        # the census side of every band and window, fixed over the passes
+        bands = {}
+        for band, micron, _tag in _farir_active_bands():
+            observed, log10_r, detected, r_limit = census[micron]
+            r_theta, defined = _template_log10_r_band(reg, band)
+            entry["n_undefined"][micron] = int(((frac_g > 0.5) & ~defined).sum())
+            weight0 = np.where(defined, frac_g * w_pre, 0.0)
+            # the windows are those of the group's own census, except the disc group, which takes the
+            # protostellar group's (a census of its own that never reaches the detection count)
+            windows, census_slice = _farir_windows(
+                log10_f, (in_proto if g != 0 else in_group) & observed & detected, n_slices, inner_edges)
+            slices = []
+            for j, (lo, hi) in enumerate(windows):
+                in_window = (census_slice >= lo) & (census_slice <= hi) & observed
+                own = in_group & in_window
+                pooled = False
+                census_mask = own
+                if own[detected].sum() < FARIR_DISK_POOL_BELOW and codes != proto_codes:
+                    census_mask = (in_group | in_proto) & in_window
+                    pooled = True
+                n_det, n_cens = int((census_mask & detected).sum()), int((census_mask & ~detected).sum())
+                base = (tmpl_slice >= lo) & (tmpl_slice <= hi)
+                rec = dict(slice=j, window=(lo, hi), n_det_own=int((own & detected).sum()),
+                           n_det=n_det, n_cens=n_cens, pooled_with_proto=pooled,
+                           n_templates=int((base & defined).sum()), weight=float(weight0[base].sum()),
+                           floor_applied=bool(n_det + n_cens < FARIR_DISK_POOL_BELOW))
+                if weight0[base].sum() <= 0 or n_det < 2:
+                    rec.update(skipped=True)
+                    slices.append(rec)
+                    continue
+                r_det, limit = log10_r[census_mask & detected], r_limit[census_mask & ~detected]
+                h = _silverman_bandwidth(r_det)
+                in_lib = (tmpl_slice >= lo) & (tmpl_slice <= hi) & defined
+                lo_r = min(np.nanmin(r_theta[in_lib]), r_det.min(), limit.min() if limit.size else np.inf)
+                hi_r = max(np.nanmax(r_theta[in_lib]), r_det.max())
+                grid = _r_grid(lo_r, hi_r, h)
+                q, cdf, n_iter = _censored_r_density(grid, r_det, np.full(r_det.size, h), limit)
+                cen_share = 1.0 - float(np.interp(GALZ_RED_R, grid, cdf))
+                rec.update(bandwidth=float(h), n_iter=n_iter, grid=grid, q=q, cdf=cdf, skipped=False,
+                           in_lib=np.flatnonzero(in_lib), base_def=np.flatnonzero(base & defined),
+                           census_share=cen_share,
+                           census_err=float(np.sqrt(cen_share * (1 - cen_share) / (n_det + n_cens))))
+                slices.append(rec)
+            bands[micron] = dict(slices=slices, f_band=np.ones(n_model), r_theta=r_theta, defined=defined)
+        small_templates = np.zeros(n_model, dtype=bool)
+        for bd in bands.values():
+            for rec in bd["slices"]:
+                if rec["floor_applied"]:
+                    small_templates[(tmpl_slice >= rec["window"][0]) & (tmpl_slice <= rec["window"][1])] = True
+        passes = []
+        for n_pass in range(1, FARIR_IPF_MAX_PASSES + 1):
+            for _band, micron, _tag in _farir_active_bands():
+                bd = bands[micron]
+                r_theta, defined = bd["r_theta"], bd["defined"]
+                # the library as weighted now: every factor so far (iterative proportional fitting)
+                weight = np.where(defined, frac_g * w_pre * f[:, g], 0.0)
+                update = np.ones(n_model)
+                for rec in bd["slices"]:
+                    if rec["skipped"]:
+                        continue
+                    lo, hi = rec["window"]
+                    in_lib, base_def, grid = rec["in_lib"], rec["base_def"], rec["grid"]
+                    step = grid[1] - grid[0]
+                    edges = np.append(grid - 0.5 * step, grid[-1] + 0.5 * step)
+                    counts, _ = np.histogram(r_theta[in_lib], bins=edges, weights=weight[in_lib])
+                    n_g = gaussian_filter1d(counts, rec["bandwidth"] / step, mode="constant") / (
+                        step * weight[in_lib].sum())
+                    ratio = np.interp(r_theta[base_def], grid, rec["q"]) / np.maximum(
+                        np.interp(r_theta[base_def], grid, n_g), 1e-300)
+                    # a template with no weight in this group (not a member, no brightness weight, or driven
+                    # to below FARIR_NEGLIGIBLE_WEIGHT of the window's mass by the factors so far) has no say
+                    # in the library density its ratio divides by: its update is 1 rather than q / 1e-300
+                    ratio = np.where(weight[base_def] > FARIR_NEGLIGIBLE_WEIGHT * weight[in_lib].sum(), ratio, 1.0)
+                    update[base_def] = ratio
+                    base_undef = np.flatnonzero((tmpl_slice >= lo) & (tmpl_slice <= hi) & ~defined)
+                    wb = weight[base_def]
+                    update[base_undef] = (wb * ratio).sum() / wb.sum() if wb.sum() > 0 else 1.0
+                f[:, g] *= update
+                bd["f_band"] *= update
+                # the floor is on the template's accumulated far-infrared factor, in a window of a small census
+                f[:, g] = np.where(small_templates, np.maximum(f[:, g], np.exp(FARIR_SMALL_CENSUS_FLOOR_LN)), f[:, g])
+            worst = _farir_worst_z(bands, frac_g, w_pre, f[:, g])
+            passes.append(worst)
+            if worst <= FARIR_IPF_TOLERANCE or len(_farir_active_bands()) == 1:
+                break      # one band: its single update is the whole estimate
+        entry["passes"] = passes
+        for bd in bands.values():
+            bd["f_cum"] = f[:, g].copy()
+        entry["bands"] = bands
     return f, info
 
 
 def yso_farir_report(config):
-    """Prints the far-infrared factor's own numbers (spec sec 5.5): per
-    group, the templates with undefined `r` (kept out of the library density,
-    given a placeholder weight), the census size and bandwidth, and the
-    group's `r` quantiles under the census's censored estimate against the
-    weighted library's. The weighted library is each template's survey-wide
-    census weight times its soft group fraction (`yso_population_weight`
-    without the diskless group); it equals the census only as far as the
-    brightness statement does not itself select on `r`."""
-    reg = _read_register(config, "yso", extra_bands=(FARIR_BAND,))
+    """Prints the far-infrared factor's own numbers (spec sec 5.5): per group,
+    the templates with undefined `r` in each band, and per group x band x
+    brightness slice the census sizes used (detected + censored, the window
+    the slice was pooled to, any pooling with the protostellar census), the
+    bandwidth, and the `r` quantiles (16/50/84 %) of the census's censored
+    estimate against the weighted library of the slice with this band's factor
+    alone, with all three bands' factor, and without. The weighted library is
+    each template's survey-wide census weight times its soft group fraction.
+    One line per group and band prints the share of the slice
+    `FARIR_REPORT_SLICE` above `GALZ_RED_R`."""
+    reg = _read_register(config, "yso", extra_bands=tuple(b for b, _m, _t in YSO_FARIR_BANDS))
     names, w_pre, frac, sub_idx, census_groups, f = _yso_population_weight_parts(config, use_r=True)
-    r_theta, defined = _template_log10_r(reg)
     _, info = _yso_farir(config, reg, frac, sub_idx, w_pre)
     for g, ((labels, share), entry) in enumerate(zip(census_groups, info)):
         frac_g = frac[:, [sub_idx[sub] for sub in labels]].sum(axis=1)
-        print(f"template_weights.yso FAR-INFRARED: group {'+'.join(entry['labels'])}: "
-              f"{entry['n_undefined']} of {entry['n_group']} templates have undefined r (F_REF_I2 not positive, or "
-              f"F_REF_P70 zero or non-finite), left out of the library r density and given the group's mean "
-              f"factor", flush=True)
+        tag = '+'.join(entry['labels'])
         if not entry["codes"]:
-            print(f"template_weights.yso FAR-INFRARED: group {'+'.join(entry['labels'])}: no census class, "
-                  f"factor 1", flush=True)
+            print(f"template_weights.yso FAR-INFRARED: group {tag}: no census class, factor 1", flush=True)
             continue
-        w = np.where(defined, w_pre * frac_g * f[:, g], 0.0)
-        lib = _weighted_quantiles(r_theta[defined], w[defined], FARIR_PRINT_QUANTILES)
-        w0 = np.where(defined, w_pre * frac_g, 0.0)
-        lib0 = _weighted_quantiles(r_theta[defined], w0[defined], FARIR_PRINT_QUANTILES)
-        grid, cdf = entry["grid"], entry["cdf"]
-        cen = np.interp(FARIR_PRINT_QUANTILES, cdf, grid)
-        print(f"template_weights.yso FAR-INFRARED: "
-              f"group {'+'.join(entry['labels'])} census classes {','.join(entry['codes'])}: "
-              f"{entry['n_det']} detected + {entry['n_cens']} censored, bandwidth {entry['bandwidth']:.3f} dex, "
-              f"iterations {entry['n_iter']}; r quantiles (16/50/84%) census "
-              + "/".join(f"{x:.2f}" for x in cen) + "; weighted library with factor "
-              + "/".join(f"{x:.2f}" for x in lib) + "; weighted library without "
-              + "/".join(f"{x:.2f}" for x in lib0), flush=True)
+        edges = entry["inner_edges"]
+        print(f"template_weights.yso FAR-INFRARED: group {tag}: {len(entry['passes'])} passes of the band iteration, "
+              f"worst |z| of the share above r = {GALZ_RED_R:g} per pass: "
+              + ", ".join(f"{z:.2f}" for z in entry["passes"]), flush=True)
+        for _band, micron, _t in _farir_active_bands():
+            b = entry["bands"][micron]
+            print(f"template_weights.yso FAR-INFRARED: group {tag} {micron} um: {entry['n_undefined'][micron]} of "
+                  f"{entry['n_group']} templates have undefined r (reference flux in the band or at 4.5 micron "
+                  f"not positive), left out of the library r density and given their slice's mean factor",
+                  flush=True)
+            for rec in b["slices"]:
+                wlo, whi = rec["window"]
+                lo_f = edges[wlo - 1] if wlo > 0 else -np.inf
+                hi_f = edges[whi] if whi < edges.size else np.inf
+                if rec["skipped"]:
+                    print(f"template_weights.yso FAR-INFRARED: group {tag} {micron} um slice log10 f45 in "
+                          f"[{lo_f:g},{hi_f:g}): {rec['n_templates']} defined templates, weight "
+                          f"{rec['weight']:.3g}; census window {rec['window']} holds {rec['n_det']} detected + "
+                          f"{rec['n_cens']} censored -> factor 1 (no library weight or fewer than 2 detections)",
+                          flush=True)
+                    continue
+                m = (np.digitize(_c_theta(reg), edges) >= wlo) & (np.digitize(_c_theta(reg), edges) <= whi) & b["defined"]
+                r = b["r_theta"][m]
+                w_with_band = frac_g[m] * w_pre[m] * b["f_cum"][m]
+                w_with_all = frac_g[m] * w_pre[m] * f[m, g]
+                w_without = frac_g[m] * w_pre[m]
+                q3 = {k: _weighted_quantiles(r, w, FARIR_PRINT_QUANTILES)
+                      for k, w in (("band", w_with_band), ("all", w_with_all), ("none", w_without))}
+                cen = np.interp(FARIR_PRINT_QUANTILES, rec["cdf"], rec["grid"])
+                fmt = lambda x: "/".join(f"{v:.2f}" for v in x)
+                pool = (f"; pooled with the protostellar census (own {rec['n_det_own']} detections)"
+                        if rec["pooled_with_proto"] else "")
+                floor = "; factor floored at exp(-5)" if rec["floor_applied"] else ""
+                print(f"template_weights.yso FAR-INFRARED: group {tag} {micron} um slice log10 f45 in "
+                      f"[{lo_f:g},{hi_f:g}): census "
+                      f"{rec['n_det']} detected + {rec['n_cens']} censored{pool}{floor}, bandwidth "
+                      f"{rec['bandwidth']:.3f} dex; {rec['n_templates']} templates; r quantiles (16/50/84%) census "
+                      f"{fmt(cen)}; weighted library after the iteration {fmt(q3['band'])}, with all three "
+                      f"{fmt(q3['all'])}, without {fmt(q3['none'])}", flush=True)
+            # the share above GALZ_RED_R in the report slice
+            report_block = [r_ for r_ in b["slices"] if not r_["skipped"]
+                            and (edges[r_["window"][0] - 1] if r_["window"][0] > 0 else -np.inf) <= FARIR_REPORT_SLICE[0] + 1e-9
+                            and (edges[r_["window"][1]] if r_["window"][1] < edges.size else np.inf) >= FARIR_REPORT_SLICE[1] - 1e-9]
+            if report_block:
+                rec = report_block[0]
+                ct = np.digitize(_c_theta(reg), edges)
+                m = (ct >= rec["window"][0]) & (ct <= rec["window"][1]) & b["defined"]
+                hi = b["r_theta"][m] >= GALZ_RED_R
+                shares = []
+                for w in (frac_g[m] * w_pre[m], frac_g[m] * w_pre[m] * b["f_cum"][m], frac_g[m] * w_pre[m] * f[m, g]):
+                    shares.append(w[hi].sum() / w.sum())
+                cen_share = 1.0 - float(np.interp(GALZ_RED_R, rec["grid"], rec["cdf"]))
+                print(f"template_weights.yso FAR-INFRARED: group {tag} {micron} um, slice log10 f45 in "
+                      f"[{FARIR_REPORT_SLICE[0]:g},{FARIR_REPORT_SLICE[1]:g}) (block [{rec['window'][0]}-{rec['window'][1]}]), share at r >= {GALZ_RED_R:g}: "
+                      f"census {cen_share:.3f} +- {np.sqrt(cen_share * (1 - cen_share) / (rec['n_det'] + rec['n_cens'])):.3f} "
+                      f"(binomial, n_census {rec['n_det'] + rec['n_cens']}); weighted library without factor "
+                      f"{shares[0]:.3f}, after the iteration {shares[1]:.3f}, with all three {shares[2]:.3f}", flush=True)
 
 
 def _yso_population_weight_parts(config, use_r=True):
@@ -720,7 +969,7 @@ def _yso_population_weight_parts(config, use_r=True):
     Class III objects' fluxes (no class cut on the catalogue), so the
     library side matches it template for template. (ii) The viewing
     angle, uniform in cos i (the existing sin i factor)."""
-    reg = _read_register(config, "yso", extra_bands=(FARIR_BAND,))
+    reg = _read_register(config, "yso", extra_bands=tuple(b for b, _m, _t in YSO_FARIR_BANDS))
     names = reg["names"]
     n_model = names.size
     c_theta = _c_theta(reg)  # log10 f_ref,4.5,theta, floored (sec 4.1)
